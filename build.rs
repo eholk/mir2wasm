@@ -8,7 +8,7 @@ use std::process::Command;
 use std::thread;
 
 /// Build from https://wasm-stat.us that we are known to work with.
-const WASM_BUILD: &'static str = "9901";
+const WASM_BUILD: &'static str = "11705";
 
 fn main() {
     let cmake = thread::spawn(|| {
