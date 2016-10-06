@@ -68,8 +68,8 @@ fn update_wasm_toolchain() {
     // If we got here, we need to update.
     const TMP_FILE : &'static str = ".wasm-install.tbz2";
 
-    let url = format!("https://storage.googleapis.com/wasm-llvm/builds/git/wasm-binaries-{}.tbz2",
-                      WASM_BUILD);
+    let url = format!("https://storage.googleapis.com/wasm-llvm/builds/linux/{}/wasm-binaries-{}.tbz2",
+                      WASM_BUILD, WASM_BUILD);
     let url = url.as_str();
     Command::new("wget").args(&[url, "-O", TMP_FILE]).status()
         .and_then(|_| {
