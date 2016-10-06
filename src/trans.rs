@@ -228,7 +228,7 @@ impl<'v, 'tcx: 'v> BinaryenFnCtxt<'v, 'tcx> {
         let binaryen_args: Vec<_> = self.sig.inputs.iter().map(|t| rust_ty_to_binaryen(t)).collect();
         let mut needs_ret_var = false;
         let ret_ty = self.sig.output;
-        let binaryen_ret = if !ret_ty.is_nil() {
+        let binaryen_ret = if !ret_ty.is_nil() && !ret_ty.is_never() {
             needs_ret_var = true;
             rust_ty_to_binaryen(ret_ty)
         } else {
@@ -240,14 +240,19 @@ impl<'v, 'tcx: 'v> BinaryenFnCtxt<'v, 'tcx> {
         let mut vars = Vec::new();
 
         for mir_var in &self.mir.var_decls {
-            vars.push(rust_ty_to_binaryen(mir_var.ty));
+            // TODO: this is a hack...
+            let ty = rust_ty_to_binaryen(mir_var.ty);
+            vars.push(if ty == BinaryenNone() { BinaryenInt32() } else { ty });
         }
 
         for mir_var in &self.mir.temp_decls {
-            vars.push(rust_ty_to_binaryen(mir_var.ty));
+            // TODO: this is a hack...
+            let ty = rust_ty_to_binaryen(mir_var.ty);
+            vars.push(if ty == BinaryenNone() { BinaryenInt32() } else { ty });
         }
 
         if needs_ret_var {
+            assert!(binaryen_ret != BinaryenNone());
             vars.push(binaryen_ret);
         }
 
@@ -310,7 +315,7 @@ impl<'v, 'tcx: 'v> BinaryenFnCtxt<'v, 'tcx> {
                     }
 
                     debug!("emitting Return from fn {:?}", self.tcx.item_path_str(self.did));
-                    let expr = if ret_ty.is_nil() {
+                    let expr = if ret_ty.is_nil() || ret_ty.is_never() {
                         BinaryenExpressionRef(ptr::null_mut())
                     } else {
                         self.trans_operand(&Operand::Consume(Lvalue::ReturnPointer))
@@ -363,6 +368,17 @@ impl<'v, 'tcx: 'v> BinaryenFnCtxt<'v, 'tcx> {
                                              b_args.as_ptr(),
                                              BinaryenIndex(b_args.len() as _),
                                              b_fnty)
+                            }
+                            BinaryenCallKind::DirectNoReturn => {
+                                let mut stmts = Vec::new();
+                                stmts.push(BinaryenCall(self.module,
+                                                        b_func,
+                                                        b_args.as_ptr(),
+                                                        BinaryenIndex(b_args.len() as _),
+                                                        b_fnty));
+                                stmts.push(BinaryenUnreachable(self.module));
+                                BinaryenBlock(self.module, ptr::null(), stmts.as_ptr(),
+                                              BinaryenIndex(stmts.len() as _))
                             }
                             BinaryenCallKind::Import => {
                                 BinaryenCallImport(self.module,
@@ -458,7 +474,9 @@ impl<'v, 'tcx: 'v> BinaryenFnCtxt<'v, 'tcx> {
                         panic!("untranslated fn call to {:?}", func)
                     }
                 },
-                _ => ()
+                ref other => {
+                    debug!("unhandled TerminatorKind: {:?}", other);
+                }
             }
             unsafe {
                 let name = format!("bb{}", i);
@@ -599,7 +617,7 @@ impl<'v, 'tcx: 'v> BinaryenFnCtxt<'v, 'tcx> {
                 BinaryenAddFunction(self.module, fn_name_ptr,
                                     *self.fun_types.get(self.sig).unwrap(),
                                     vars.as_ptr(),
-                                    BinaryenIndex(vars.len() as _),
+                                    BinaryenIndex(0),
                                     BinaryenUnreachable(self.module));
             } else {
                 // Create the function prologue
@@ -1198,6 +1216,11 @@ impl<'v, 'tcx: 'v> BinaryenFnCtxt<'v, 'tcx> {
                             }
 
                             let ret_ty = if !fn_sig.output.is_nil() {
+                                if fn_sig.output.is_never() {
+                                    assert!(call_kind == BinaryenCallKind::Direct);
+                                    call_kind = BinaryenCallKind::DirectNoReturn;
+                                }
+
                                 rust_ty_to_binaryen(fn_sig.output)
                             } else {
                                 BinaryenNone()
@@ -1334,9 +1357,21 @@ fn rust_ty_to_binaryen<'tcx>(t: Ty<'tcx>) -> BinaryenType {
         },
         ty::TyInt(IntTy::I64) | ty::TyUint(UintTy::U64) => {
             BinaryenInt64()
-        }
-        _ => {
+        },
+        ty::TyInt(IntTy::I32) | ty::TyInt(IntTy::Is) |
+        ty::TyUint(UintTy::U32) | ty::TyUint(UintTy::Us) => {
             BinaryenInt32()
+        },
+        ty::TyBool => BinaryenInt32(),
+        ty::TyNever => BinaryenNone(),
+        ty::TyTuple(ref tys) if tys.is_empty() => BinaryenNone(),
+        ty::TyTuple(_) => BinaryenInt32(),
+        ty::TyRef(_, _) => BinaryenInt32(),
+        // TODO: for projections we probably want the underlying type.
+        ty::TyProjection(_) => BinaryenInt32(),
+        ty::TyAdt(..) => BinaryenInt32(),
+        ref ty => {
+            panic!("unimplemented type mapping for {:?}", ty)
         }
     }
 }
@@ -1350,11 +1385,12 @@ fn sanitize_symbol(s: &str) -> String {
     }).collect()
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum BinaryenCallKind {
     Direct,
     Import,
     // Indirect // unimplemented at the moment
+    DirectNoReturn,
 }
 
 enum BinaryenBlockKind {
