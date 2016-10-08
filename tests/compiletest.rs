@@ -138,7 +138,7 @@ fn run_and_check_output(vm: &str, mut cmd: std::process::Command, expected: &[St
             writeln!(stderr, "[{}] FAILED with exit code {:?}",
                      vm,
                      output.status.code()).unwrap();
-            writeln!(stderr, "cmd: {:?}", cmd).unwrap();
+            writeln!(stderr, "cmd: \n {:?}", cmd).unwrap();
             writeln!(stderr, "stdout: \n {}",
                      std::str::from_utf8(&output.stdout).unwrap()).unwrap();
             writeln!(stderr, "stderr: \n {}",

@@ -86,7 +86,7 @@ impl<'module, 'name> From<FnType<'module, 'name>> for sys::BinaryenFunctionTypeR
 /// Representable types.
 ///
 /// These are types that can actually exist, for example, as a local variable.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum ReprType {
     Int32, Int64, Float32, Float64
 }
@@ -165,7 +165,7 @@ impl<'module> Fn<'module> {
 
     // TODO: this should be private
     pub fn binaryen_var_types(&self) -> Vec<sys::BinaryenType> {
-        self.vars.iter().map(|x| x.into()).collect()
+        self.vars[self.num_args..].iter().map(|x| x.into()).collect()
     }
 
     // TODO: this should be private
@@ -181,7 +181,7 @@ impl<'module> Fn<'module> {
 
     // TODO: ret_ty should not be a parameter here.
     pub fn create_sig_type(&mut self, name: &CString, ret_ty: Type) -> sys::BinaryenFunctionTypeRef {
-        let arg_tys: Vec<_> = self.vars.iter().map(|x| x.ty).collect();
+        let arg_tys: Vec<_> = self.vars[0..self.num_args].iter().map(|x| x.ty).collect();
         self.module.create_function_type(&name, &arg_tys[..],
                                               ret_ty).into()
     }
@@ -196,6 +196,7 @@ pub struct Var {
 
 impl Var {
     pub fn index(&self) -> usize { self.index }
+    pub fn ty(&self) -> ReprType { self.ty }
 }
 
 impl<'a> From<&'a Var> for ReprType {
@@ -243,9 +244,5 @@ mod test {
     #[test]
     fn create_module() {
         let _ = Module::new();
-        // TODO: make sure these tests actually run. The panic should
-        // make this always fail, but instead it seems to just not be
-        // running.
-        panic!();
     }
 }

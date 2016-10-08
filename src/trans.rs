@@ -254,8 +254,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         }
 
         for mir_var in &self.mir.temp_decls {
-            debug!("adding temp {:?}", mir_var);
+            debug!("adding {:?}", mir_var);
             let ty = rust_ty_to_builder(mir_var.ty).map(|ty| self.func.create_local(ty).index());
+            debug!("type is {:?}", &ty);
             self.temp_map.push(ty);
         }
 
@@ -272,6 +273,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
         // checked operation local for the intermediate result of a checked operation (double-width)
         let checked_op_local = self.func.create_local(builder::ReprType::Int64).index();
+        assert!(self.func.get_var(checked_op_local).ty() == builder::ReprType::Int64);
         self.checked_op_local = Some(checked_op_local.into());
 
         let locals_count = self.sig.inputs.len() + self.func.num_locals();
@@ -337,7 +339,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     binaryen_stmts.push(expr);
                 }
                 TerminatorKind::Switch { ref discr, .. } => {
-                    let adt = self.trans_lval(discr);
+                    let adt = self.trans_lval(discr).unwrap();
                     let adt_ty = discr.ty(self.mir, *self.tcx).to_ty(*self.tcx);
 
                     if adt.offset.is_some() {
@@ -393,18 +395,13 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
                         match *destination {
                             Some((ref lvalue, _)) => {
-                                let dest = self.trans_lval(lvalue);
-
                                 if b_fnty == BinaryenNone() {
                                     // The result of the Rust call is put in MIR into a tmp local,
                                     // but the wasm function returns void (like the print externs)
-                                    // TODO: what representation should the unit type have in wasm ?
-                                    debug!("emitting {:?} Call to fn {:?} + SetLocal({}) for unit type", call_kind, func, dest.index.0);
+                                    debug!("emitting {:?} Call to fn {:?} for unit type", call_kind, func);
                                     binaryen_stmts.push(b_call);
-
-                                    let unit_type = BinaryenConst(self.func.module.module, BinaryenLiteralInt32(-1));
-                                    binaryen_stmts.push(BinaryenSetLocal(self.func.module.module, dest.index, unit_type));
                                 } else {
+                                    let dest = self.trans_lval(lvalue).unwrap();
                                     let dest_ty = lvalue.ty(self.mir, *self.tcx).to_ty(*self.tcx);
                                     let dest_layout = self.type_layout(dest_ty);
 
@@ -614,10 +611,11 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 //       also handle #[lang = "panic_fmt"] to support panic messages
                 debug!("emitting Unreachable function for panic lang item");
                 // TODO(eholk): builderize this.
+                let var_types = self.func.binaryen_var_types();
                 BinaryenAddFunction(self.func.module.module, fn_name_ptr,
                                     *self.fun_types.get(self.sig).unwrap(),
-                                    self.func.binaryen_var_types().as_ptr(),
-                                    BinaryenIndex(self.func.num_vars() as _),
+                                    var_types.as_ptr(),
+                                    var_types.len().into(),
                                     BinaryenUnreachable(self.func.module.module));
             } else {
                 // Create the function prologue
@@ -638,10 +636,11 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                                     self.func.module.module);
 
                 // TODO(eholk): builderize this.
+                let var_types = self.func.binaryen_var_types();
                 BinaryenAddFunction(self.func.module.module, fn_name_ptr,
                                     *self.fun_types.get(self.sig).unwrap(),
-                                    self.func.binaryen_var_types().as_ptr(),
-                                    BinaryenIndex(self.func.num_vars() as _),
+                                    var_types.as_ptr(),
+                                    var_types.len().into(),
                                     body);
 
                 // TODO: don't unconditionally export this
@@ -660,8 +659,17 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         debug!("done translating fn {:?}\n", self.tcx.item_path_str(self.did));
     }
 
-    fn trans_assignment(&mut self, lvalue: &Lvalue<'tcx>, rvalue: &Rvalue<'tcx>, statements: &mut Vec<BinaryenExpressionRef>) {
-        let dest = self.trans_lval(lvalue);
+    fn trans_assignment(&mut self, lvalue: &Lvalue<'tcx>, rvalue: &Rvalue<'tcx>,
+                        statements: &mut Vec<BinaryenExpressionRef>) {
+        let dest = match self.trans_lval(lvalue) {
+            Some(dest) => dest,
+            None => {
+                // TODO: the rvalue may have some effects that we need to preserve. For example,
+                // reading from memory can cause a fault.
+                debug!("trans_assignment lval is unit: {:?} = {:?}; skipping", lvalue, rvalue);
+                return;
+            }
+        };
         let dest_ty = lvalue.ty(self.mir, *self.tcx).to_ty(*self.tcx);
 
         let dest_layout = self.type_layout(dest_ty);
@@ -764,17 +772,22 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                         BinaryenUnary(self.func.module.module, BinaryenExtendSInt32(), left),
                         BinaryenUnary(self.func.module.module, BinaryenExtendSInt32(), right));
 
-                    statements.push(BinaryenSetLocal(self.func.module.module, self.checked_op_local.unwrap(), op));
+                    let checked_local = self.checked_op_local.unwrap();
+                    
+                    statements.push(BinaryenSetLocal(self.func.module.module, checked_local, op));
 
                     let lower = BinaryenUnary(self.func.module.module, BinaryenWrapInt64(),
-                        BinaryenGetLocal(self.func.module.module, self.checked_op_local.unwrap(), BinaryenInt64()));
+                                              BinaryenGetLocal(self.func.module.module, checked_local,
+                                                               BinaryenInt64()));
 
                     let thirty_two = BinaryenConst(self.func.module.module, BinaryenLiteralInt64(32));
 
                     let upper = BinaryenUnary(self.func.module.module, BinaryenWrapInt64(),
-                        BinaryenBinary(self.func.module.module, BinaryenShrUInt64(),
-                            BinaryenGetLocal(self.func.module.module, self.checked_op_local.unwrap(), BinaryenInt64()),
-                            thirty_two));
+                                              BinaryenBinary(self.func.module.module, BinaryenShrUInt64(),
+                                                             BinaryenGetLocal(self.func.module.module,
+                                                                              self.checked_op_local.unwrap(),
+                                                                              BinaryenInt64()),
+                                                             thirty_two));
 
                     match dest.offset {
                         Some(offset) => {
@@ -790,10 +803,13 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                             debug!("allocating tuple in linear memory to SetLocal({}), size: {:?} bytes", dest.index.0, dest_size);
                             let allocation = self.emit_alloca(dest.index, dest_size);
                             statements.push(allocation);
-                            let ptr = BinaryenGetLocal(self.func.module.module, dest.index, rust_ty_to_binaryen(dest_ty));
+                            let ptr = BinaryenGetLocal(self.func.module.module, dest.index,
+                                                       rust_ty_to_binaryen(dest_ty));
 
-                            statements.push(BinaryenStore(self.func.module.module, 4, 0, 0, ptr, lower, BinaryenInt32()));
-                            statements.push(BinaryenStore(self.func.module.module, 4, 4, 0, ptr, upper, BinaryenInt32()));
+                            statements.push(BinaryenStore(self.func.module.module, 4, 0, 0, ptr,
+                                                          lower, BinaryenInt32()));
+                            statements.push(BinaryenStore(self.func.module.module, 4, 4, 0, ptr,
+                                                          upper, BinaryenInt32()));
                         }
                     }
                 }
@@ -992,27 +1008,40 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         }
     }
 
-    fn trans_lval(&mut self, lvalue: &Lvalue<'tcx>) -> BinaryenLvalue {
+    fn trans_lval(&mut self, lvalue: &Lvalue<'tcx>) -> Option<BinaryenLvalue> {
         let i = match *lvalue {
             Lvalue::Arg(i) => i.index() as u32,
             Lvalue::Var(i) => {
-                self.var_map[i.index()].unwrap().index() as u32
+                match self.var_map[i.index()] {
+                    Some(i) => i as u32,
+                    None => return None
+                }
             }
             Lvalue::Temp(i) => {
-                self.temp_map[i.index()].unwrap().index() as u32
+                match self.temp_map[i.index()] {
+                    Some(i) => i as u32,
+                    None => return None
+                }
             }
             Lvalue::ReturnPointer => {
-                self.ret_var.unwrap().index() as u32
+                debug!("Translating ret_var lval. self.ret_var = {:?}", self.ret_var);
+                match self.ret_var {
+                    Some(x) => x.index() as u32,
+                    None => return None
+                }
             }
             Lvalue::Projection(ref projection) => {
-                let base = self.trans_lval(&projection.base);
+                let base = match self.trans_lval(&projection.base) {
+                    Some(base) => base,
+                    None => return None
+                };
                 let base_ty = projection.base.ty(self.mir, *self.tcx).to_ty(*self.tcx);
                 let base_layout = self.type_layout(base_ty);
 
                 match projection.elem {
                     ProjectionElem::Deref => {
                         if base.offset.is_none() {
-                            return BinaryenLvalue::new(base.index, None, LvalueExtra::None);
+                            return Some(BinaryenLvalue::new(base.index, None, LvalueExtra::None));
                         }
                         panic!("unimplemented Deref {:?}", lvalue);
                     }
@@ -1030,7 +1059,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                         };
 
                         let offset = variant.field_offset(field.index()).bytes() as u32;
-                        return BinaryenLvalue::new(base.index, base.offset, LvalueExtra::None).offset(offset);
+                        return Some(BinaryenLvalue::new(base.index, base.offset, LvalueExtra::None)
+                                    .offset(offset));
                     }
                     ProjectionElem::Downcast(_, variant) => {
                         match *base_layout {
@@ -1038,7 +1068,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                 assert!(base.offset.is_none(), "unimplemented Downcast Projection with offset");
 
                                 let offset = discr.size().bytes() as u32;
-                                return BinaryenLvalue::new(base.index, Some(offset), LvalueExtra::DowncastVariant(variant));
+                                return Some(
+                                    BinaryenLvalue::new(base.index, Some(offset),
+                                                        LvalueExtra::DowncastVariant(variant)));
                             }
                             _ => panic!("unimplemented Downcast Projection: {:?}", projection)
                         }
@@ -1049,13 +1081,19 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             _ => panic!("unimplemented Lvalue: {:?}", lvalue)
         };
 
-        BinaryenLvalue::new(BinaryenIndex(i), None, LvalueExtra::None)
+        Some(BinaryenLvalue::new(BinaryenIndex(i), None, LvalueExtra::None))
     }
 
     fn trans_operand(&mut self, operand: &Operand<'tcx>) -> BinaryenExpressionRef {
         match *operand {
             Operand::Consume(ref lvalue) => {
-                let binaryen_lvalue = self.trans_lval(lvalue);
+                let binaryen_lvalue = match self.trans_lval(lvalue) {
+                    Some(lval) => lval,
+                    None => {
+                        debug!("operand lval is unit: {:?}", operand);
+                        return unsafe {BinaryenUnreachable(self.func.module.module) }
+                    }
+                };
                 let lval_ty = lvalue.ty(self.mir, *self.tcx);
                 let t = lval_ty.to_ty(*self.tcx);
                 let t = rust_ty_to_binaryen(t);
