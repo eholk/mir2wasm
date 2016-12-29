@@ -10,7 +10,7 @@ extern crate rustc_driver;
 
 // FIXME: C++ static linkage hacks. How do you do this for real?!
 #[link_args = "-lstdc++ -static-libstdc++"]
-extern { }
+extern "C" {}
 
 use getopts::{getopts, optflag, optopt};
 use mir2wasm::trans::{self, WasmTransOptions};
@@ -19,23 +19,20 @@ use rustc_driver::{driver, CompilerCalls};
 use std::process;
 
 struct WasmCompilerCalls {
-    options: WasmTransOptions
+    options: WasmTransOptions,
 }
 
 impl WasmCompilerCalls {
     fn new(options: WasmTransOptions) -> WasmCompilerCalls {
-        WasmCompilerCalls {
-            options: options
-        }
+        WasmCompilerCalls { options: options }
     }
 }
 
 impl<'a> CompilerCalls<'a> for WasmCompilerCalls {
-    fn build_controller(
-        &mut self,
-        _: &Session,
-        _: &getopts::Matches
-    ) -> driver::CompileController<'a> {
+    fn build_controller(&mut self,
+                        _: &Session,
+                        _: &getopts::Matches)
+                        -> driver::CompileController<'a> {
         let mut control = driver::CompileController::basic();
 
         let options = self.options.clone();
@@ -45,8 +42,15 @@ impl<'a> CompilerCalls<'a> for WasmCompilerCalls {
             state.session.abort_if_errors();
 
             let entry_fn = state.session.entry_fn.borrow();
-            let entry_fn = if let Some((node_id, _)) = *entry_fn { Some(node_id) } else { None };
-            trans::trans_crate(&state.tcx.unwrap(), state.mir_map.unwrap(), entry_fn, &options)
+            let entry_fn = if let Some((node_id, _)) = *entry_fn {
+                Some(node_id)
+            } else {
+                None
+            };
+            trans::trans_crate(&state.tcx.unwrap(),
+                               state.mir_map.unwrap(),
+                               entry_fn,
+                               &options)
                 .expect("error translating crate");
         });
 
@@ -57,18 +61,19 @@ impl<'a> CompilerCalls<'a> for WasmCompilerCalls {
 fn main() {
     env_logger::init().unwrap();
 
-    let opts = &[
-        optflag("r", "run", "run the compiled module through the interpreter, without printing it"),
-        optopt("o", "", "write a binary wasm module to FILE", "FILE"),
-        optflag("O", "", "optimize the compiled wast module"),
-        optflag("q", "", "do not print the compiled wast module"),
-        optflag("h", "help", "display this help message"),
-    ];
+    let opts = &[optflag("r",
+                         "run",
+                         "run the compiled module through the interpreter, without printing it"),
+                 optopt("o", "", "write a binary wasm module to FILE", "FILE"),
+                 optflag("O", "", "optimize the compiled wast module"),
+                 optflag("q", "", "do not print the compiled wast module"),
+                 optflag("h", "help", "display this help message")];
 
     let mut rustc_args = Vec::new();
     let mut wasm_args = Vec::new();
-    
-    fn find_wasm_arg<'a>(s: &String, opts: &'a [getopts::OptGroup])
+
+    fn find_wasm_arg<'a>(s: &String,
+                         opts: &'a [getopts::OptGroup])
                          -> Option<&'a getopts::OptGroup> {
         for o in opts {
             if s.starts_with("--") && &s[2..] == &o.long_name {
@@ -81,7 +86,7 @@ fn main() {
         return None;
     };
 
-    let args : Vec<String> = std::env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
     info!("command line: {:?}", args);
 
     let mut argv = std::env::args().peekable();
@@ -93,19 +98,21 @@ fn main() {
                         wasm_args.push(arg);
 
                         match opt.hasarg {
-                            getopts::HasArg::Yes =>
-                                wasm_args.push(argv.next().expect("missing required argument")),
+                            getopts::HasArg::Yes => {
+                                wasm_args.push(argv.next().expect("missing required argument"))
+                            }
                             getopts::HasArg::No => (),
-                            getopts::HasArg::Maybe => 
+                            getopts::HasArg::Maybe => {
                                 if argv.peek().map_or(false, |s| s.starts_with("-")) {
-                                    wasm_args.push(argv.next().expect("this was here a moment ago"));
+                                    wasm_args.push(argv.next().expect("this was just here"));
                                 }
+                            }
                         }
                     }
-                    None => rustc_args.push(arg)
+                    None => rustc_args.push(arg),
                 }
-            },
-            None => break
+            }
+            None => break,
         }
     }
     info!("wasm args: {:?}", wasm_args);
@@ -132,10 +139,10 @@ fn main() {
     if matches.opt_present("q") {
         options.print = false;
     }
-    
+
     let mut compiler_calls = WasmCompilerCalls::new(options);
     match rustc_driver::run_compiler(&rustc_args, &mut compiler_calls) {
         (Ok(_), _) => process::exit(0),
-        (Err(code), _) => process::exit(code as i32)
+        (Err(code), _) => process::exit(code as i32),
     }
 }

@@ -3,19 +3,18 @@ use rustc::hir::def_id::DefId;
 
 use std::rc::Rc;
 use rustc::traits::{self, Reveal};
-use rustc::ty::subst::{Substs};
+use rustc::ty::subst::Substs;
 use rustc::ty::fold::TypeFoldable;
 use syntax::ast::{Name, DUMMY_NODE_ID};
-use syntax::codemap::{DUMMY_SP};
+use syntax::codemap::DUMMY_SP;
 
 // The following is 99% from Miri (terminator.rs), with error handling from rustc trans
 
 /// Trait method, which has to be resolved to an impl method.
-pub fn resolve_trait_method<'a, 'tcx>(
-    tcx: &TyCtxt<'a, 'tcx, 'tcx>,
-    def_id: DefId,
-    substs: &'tcx Substs<'tcx>
-) -> (DefId, &'tcx Substs<'tcx>) {
+pub fn resolve_trait_method<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
+                                      def_id: DefId,
+                                      substs: &'tcx Substs<'tcx>)
+                                      -> (DefId, &'tcx Substs<'tcx>) {
     let method_item = tcx.impl_or_trait_item(def_id);
     let trait_id = method_item.container().id();
     let trait_ref = ty::Binder(ty::TraitRef::from_method(*tcx, trait_id, substs));
@@ -31,8 +30,9 @@ pub fn resolve_trait_method<'a, 'tcx>(
             (mth.method.def_id, mth.substs)
         }
 
-        traits::VtableClosure(vtable_closure) =>
-            (vtable_closure.closure_def_id, vtable_closure.substs.func_substs),
+        traits::VtableClosure(vtable_closure) => {
+            (vtable_closure.closure_def_id, vtable_closure.substs.func_substs)
+        }
 
         traits::VtableFnPointer(_fn_ty) => {
             let _trait_closure_kind = tcx.lang_items.fn_trait_kind(trait_id).unwrap();
@@ -60,19 +60,17 @@ pub fn resolve_trait_method<'a, 'tcx>(
     }
 }
 
-fn fulfill_obligation<'a, 'tcx>(
-    tcx: &TyCtxt<'a, 'tcx, 'tcx>,
-    trait_ref: ty::PolyTraitRef<'tcx>
-) -> traits::Vtable<'tcx, ()> {
+fn fulfill_obligation<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
+                                trait_ref: ty::PolyTraitRef<'tcx>)
+                                -> traits::Vtable<'tcx, ()> {
     // Do the initial selection for the obligation. This yields the shallow result we are
     // looking for -- that is, what specific impl.
     tcx.infer_ctxt(None, None, Reveal::All).enter(|infcx| {
         let mut selcx = traits::SelectionContext::new(&infcx);
 
-        let obligation = traits::Obligation::new(
-            traits::ObligationCause::misc(DUMMY_SP, DUMMY_NODE_ID),
-            trait_ref.to_poly_trait_predicate(),
-        );
+        let obligation = traits::Obligation::new(traits::ObligationCause::misc(DUMMY_SP,
+                                                                               DUMMY_NODE_ID),
+                                                 trait_ref.to_poly_trait_predicate());
 
         // NOTE: This is the error handling from trans adapted to miri's fullfill_obligation
         let selection = match selcx.select(&obligation) {
@@ -87,13 +85,15 @@ fn fulfill_obligation<'a, 'tcx>(
                 debug!("Encountered ambiguity selecting `{:?}` during trans, \
                         presuming due to overflow",
                        trait_ref);
-                // NOTE: in trans, this is a tcx.sess.span_fatal(&self.span,...) error rather than a panic
+                // NOTE: in trans, this is a tcx.sess.span_fatal(&self.span,...) error rather than
+                // a panic
                 panic!("reached the recursion limit during monomorphization \
                         (selection ambiguity)");
             }
             Err(e) => {
                 panic!("Encountered error `{:?}` selecting `{:?}` during trans",
-                          e, trait_ref)
+                       e,
+                       trait_ref)
             }
         };
 
@@ -115,12 +115,11 @@ struct ImplMethod<'tcx> {
 }
 
 /// Locates the applicable definition of a method, given its name.
-fn get_impl_method<'a, 'tcx>(
-    tcx: TyCtxt<'a, 'tcx, 'tcx>,
-    impl_def_id: DefId,
-    substs: &'tcx Substs<'tcx>,
-    name: Name,
-) -> ImplMethod<'tcx> {
+fn get_impl_method<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                             impl_def_id: DefId,
+                             substs: &'tcx Substs<'tcx>,
+                             name: Name)
+                             -> ImplMethod<'tcx> {
     assert!(!substs.needs_infer());
 
     let trait_def_id = tcx.trait_id_of_impl(impl_def_id).unwrap();
@@ -129,8 +128,7 @@ fn get_impl_method<'a, 'tcx>(
     match trait_def.ancestors(impl_def_id).fn_defs(tcx, name).next() {
         Some(node_item) => {
             let substs = tcx.infer_ctxt(None, None, Reveal::All).enter(|infcx| {
-                let substs = traits::translate_substs(&infcx, impl_def_id,
-                                                      substs, node_item.node);
+                let substs = traits::translate_substs(&infcx, impl_def_id, substs, node_item.node);
                 tcx.lift(&substs).unwrap_or_else(|| {
                     bug!("trans::meth::get_impl_method: translate_substs \
                           returned {:?} which contains inference types/regions",
@@ -143,8 +141,6 @@ fn get_impl_method<'a, 'tcx>(
                 is_provided: node_item.node.is_from_trait(),
             }
         }
-        None => {
-            bug!("method {:?} not found in {:?}", name, impl_def_id)
-        }
+        None => bug!("method {:?} not found in {:?}", name, impl_def_id),
     }
 }

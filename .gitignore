@@ -7,3 +7,4 @@ tex/*/out
 /wasm-install
 /.wasm-install-ver
 /.wasm-install.tbz2
+*.bk

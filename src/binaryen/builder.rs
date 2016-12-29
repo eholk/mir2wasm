@@ -9,20 +9,18 @@ pub struct Module {
 
 impl Module {
     pub fn new() -> Module {
-        Module {
-            module: unsafe { sys::BinaryenModuleCreate() }
-        }
+        Module { module: unsafe { sys::BinaryenModuleCreate() } }
     }
 
     pub fn auto_drop(&mut self) {
         // TODO: it'd be nice not to have to use this
-        unsafe { sys::BinaryenModuleAutoDrop(self.module); }
+        unsafe {
+            sys::BinaryenModuleAutoDrop(self.module);
+        }
     }
 
     pub fn is_valid(&mut self) -> bool {
-        unsafe {
-            sys::BinaryenModuleValidate(self.module) == 1
-        }
+        unsafe { sys::BinaryenModuleValidate(self.module) == 1 }
     }
 
     pub fn optimize(&mut self) {
@@ -39,15 +37,17 @@ impl Module {
     }
 
     pub fn create_function_type<'module>(&'module mut self,
-                                  name: &'module CString,
-                                  arg_tys: &[ReprType],
-                                  ret_ty: Type)
-                                -> FnType
-    {
+                                         name: &'module CString,
+                                         arg_tys: &[ReprType],
+                                         ret_ty: Type)
+                                         -> FnType {
         let arg_tys: Vec<_> = arg_tys.iter().map(sys::BinaryenType::from).collect();
         let ty = unsafe {
-            sys::BinaryenAddFunctionType(self.module, name.as_ptr(), ret_ty.into(),
-                                         arg_tys.as_ptr(), arg_tys.len().into())
+            sys::BinaryenAddFunctionType(self.module,
+                                         name.as_ptr(),
+                                         ret_ty.into(),
+                                         arg_tys.as_ptr(),
+                                         arg_tys.len().into())
         };
         FnType {
             module: self,
@@ -88,7 +88,10 @@ impl<'module, 'name> From<FnType<'module, 'name>> for sys::BinaryenFunctionTypeR
 /// These are types that can actually exist, for example, as a local variable.
 #[derive(Copy, Clone, PartialEq)]
 pub enum ReprType {
-    Int32, Int64, Float32, Float64
+    Int32,
+    Int64,
+    Float32,
+    Float64,
 }
 
 impl<'a> From<&'a ReprType> for sys::BinaryenType {
@@ -112,7 +115,7 @@ impl<'a> From<&'a Type> for sys::BinaryenType {
     fn from(ty: &Type) -> sys::BinaryenType {
         match *ty {
             None => sys::BinaryenNone(),
-            Some(ref ty) => sys::BinaryenType::from(ty)
+            Some(ref ty) => sys::BinaryenType::from(ty),
         }
     }
 }
@@ -142,7 +145,7 @@ impl<'module> Fn<'module> {
         self.num_args += 1;
         self.create_local_raw(ty)
     }
-    
+
     pub fn create_local(&mut self, ty: ReprType) -> &Var {
         self.has_locals = true;
         self.create_local_raw(ty)
@@ -151,7 +154,7 @@ impl<'module> Fn<'module> {
     fn create_local_raw(&mut self, ty: ReprType) -> &Var {
         let index = self.vars.len();
         let var = Var {
-	        ty: ty,
+            ty: ty,
             index: index,
         };
         self.vars.push(var);
@@ -173,30 +176,50 @@ impl<'module> Fn<'module> {
         self.vars[0..self.num_args].iter().map(|x| x.into()).collect()
     }
 
-    pub fn num_args(&self) -> usize { self.num_args }
-    pub fn num_vars(&self) -> usize { self.vars.len() }
-    pub fn num_locals(&self) -> usize { self.vars.len() - self.num_args }
+    pub fn num_args(&self) -> usize {
+        self.num_args
+    }
+    pub fn num_vars(&self) -> usize {
+        self.vars.len()
+    }
+    pub fn num_locals(&self) -> usize {
+        self.vars.len() - self.num_args
+    }
 
-    pub fn get_var(&self, index: usize) -> &Var { &self.vars[index] }
+    pub fn get_var(&self, index: usize) -> &Var {
+        &self.vars[index]
+    }
 
     // TODO: ret_ty should not be a parameter here.
-    pub fn create_sig_type(&mut self, name: &CString, ret_ty: Type) -> sys::BinaryenFunctionTypeRef {
+    pub fn create_sig_type(&mut self,
+                           name: &CString,
+                           ret_ty: Type)
+                           -> sys::BinaryenFunctionTypeRef {
         let arg_tys: Vec<_> = self.vars[0..self.num_args].iter().map(|x| x.ty).collect();
-        self.module.create_function_type(&name, &arg_tys[..],
-                                              ret_ty).into()
+        self.module
+            .create_function_type(&name, &arg_tys[..], ret_ty)
+            .into()
+    }
+
+    pub fn module_ref(&self) -> sys::BinaryenModuleRef {
+        self.module.module
     }
 }
 
 pub struct Var {
     // TODO: this would be nice to have, but it causes issues.
-    //func: &'func Fn<'func>,
+    // func: &'func Fn<'func>,
     ty: ReprType,
     index: usize,
 }
 
 impl Var {
-    pub fn index(&self) -> usize { self.index }
-    pub fn ty(&self) -> ReprType { self.ty }
+    pub fn index(&self) -> usize {
+        self.index
+    }
+    pub fn ty(&self) -> ReprType {
+        self.ty
+    }
 }
 
 impl<'a> From<&'a Var> for ReprType {

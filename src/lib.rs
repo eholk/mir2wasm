@@ -7,9 +7,10 @@
 
 // FIXME: C++ static linkage hacks. How do you do this for real?!
 #[link_args = "-lstdc++ -static-libstdc++"]
-extern { }
+extern "C" {}
 
-#[macro_use] extern crate rustc;
+#[macro_use]
+extern crate rustc;
 extern crate rustc_mir;
 extern crate syntax;
 extern crate rustc_const_math;
