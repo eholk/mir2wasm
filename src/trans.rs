@@ -249,24 +249,37 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         // Create the wasm vars.
         // Params and vars form the list of locals, both sharing the same index space.
 
-        for mir_var in &self.mir.var_decls {
+        for index in 0..self.mir.local_decls.len() {
+            let local = Local::new(index);
+            let mir_var = &self.mir.local_decls[local];
             debug!("adding local {:?}", mir_var);
-            match rust_ty_to_builder(mir_var.ty) {
-                Some(ty) => {
-                    let var = self.func.create_local(ty).index();
-                    self.var_map.push(Some(var))
+            match self.mir.local_kind(local) {
+                LocalKind::Var => {
+                    match rust_ty_to_builder(mir_var.ty) {
+                        Some(ty) => {
+                            let var = self.func.create_local(ty).index();
+                            self.var_map.push(Some(var))
+                        }
+                        None => self.var_map.push(None),
+                    }
+                    self.temp_map.push(None);
                 }
-                None => self.var_map.push(None),
+                LocalKind::Temp => {
+                    debug!("adding {:?}", mir_var);
+                    let ty = rust_ty_to_builder(mir_var.ty)
+                        .map(|ty| self.func.create_local(ty).index());
+                    debug!("type is {:?}", &ty);
+                    self.temp_map.push(ty);
+                    self.var_map.push(None);
+                }
+                LocalKind::Arg | LocalKind::ReturnPointer => {
+                    self.var_map.push(None);
+                    self.temp_map.push(None);
+                }
             }
         }
 
-        for mir_var in &self.mir.temp_decls {
-            debug!("adding {:?}", mir_var);
-            let ty = rust_ty_to_builder(mir_var.ty).map(|ty| self.func.create_local(ty).index());
-            debug!("type is {:?}", &ty);
-            self.temp_map.push(ty);
-        }
-
+        // TODO: Can we use the return pointer from above?
         if needs_ret_var {
             debug!("adding ret var");
             self.ret_var =
@@ -351,7 +364,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     let expr = if ret_ty.is_nil() {
                         BinaryenExpressionRef(ptr::null_mut())
                     } else {
-                        self.trans_operand(&Operand::Consume(Lvalue::ReturnPointer))
+                        self.trans_operand(&Operand::Consume(Lvalue::Local(Local::new(0))))
                     };
                     let expr = unsafe { BinaryenReturn(self.func.module.module, expr) };
                     binaryen_stmts.push(expr);
@@ -763,7 +776,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             }
 
             if self.entry_fn == Some(nid) {
-                let is_start = self.mir.arg_decls.len() == 2;
+                let is_start = self.mir.arg_count == 2;
                 let entry_fn_name = if is_start { "start" } else { "main" };
                 let wasm_start = self.generate_runtime_start(&entry_fn_name);
                 debug!("emitting wasm Start fn into entry_fn {:?}",
@@ -1311,25 +1324,31 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
     fn trans_lval(&mut self, lvalue: &Lvalue<'tcx>) -> Option<BinaryenLvalue> {
         let i = match *lvalue {
-            Lvalue::Arg(i) => i.index() as u32,
-            Lvalue::Var(i) => {
-                match self.var_map[i.index()] {
-                    Some(i) => i as u32,
-                    None => return None,
-                }
-            }
-            Lvalue::Temp(i) => {
-                match self.temp_map[i.index()] {
-                    Some(i) => i as u32,
-                    None => return None,
-                }
-            }
-            Lvalue::ReturnPointer => {
-                debug!("Translating ret_var lval. self.ret_var = {:?}",
-                       self.ret_var);
-                match self.ret_var {
-                    Some(x) => x.index() as u32,
-                    None => return None,
+            Lvalue::Local(local) => {
+                match self.mir.local_kind(local) {
+                    LocalKind::Arg => local.index() as u32,
+                    LocalKind::Var => {
+                        debug!("translating var");
+                        match self.var_map[local.index()] {
+                            Some(i) => i as u32,
+                            None => return None,
+                        }
+                    }
+                    LocalKind::Temp => {
+                        debug!("Translating temp");
+                        match self.temp_map[local.index()] {
+                            Some(i) => i as u32,
+                            None => return None,
+                        }
+                    }
+                    LocalKind::ReturnPointer => {
+                        debug!("Translating ret_var lval. self.ret_var = {:?}",
+                               self.ret_var);
+                        match self.ret_var {
+                            Some(x) => x.index() as u32,
+                            None => return None,
+                        }
+                    }
                 }
             }
             Lvalue::Projection(ref projection) => {
