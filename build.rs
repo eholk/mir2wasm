@@ -36,6 +36,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static=support");
     println!("cargo:rustc-link-lib=static=emscripten-optimizer");
     println!("cargo:rustc-link-lib=static=asmjs");
+    println!("cargo:rustc-link-lib=static=wasm");
 
     print_deps(Path::new("binaryen"));
 }
