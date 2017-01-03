@@ -8,10 +8,6 @@ extern crate mir2wasm;
 extern crate rustc;
 extern crate rustc_driver;
 
-// FIXME: C++ static linkage hacks. How do you do this for real?!
-#[link_args = "-lstdc++ -static-libstdc++"]
-extern "C" {}
-
 use getopts::{getopts, optflag, optopt};
 use mir2wasm::trans::{self, WasmTransOptions};
 use rustc::session::Session;

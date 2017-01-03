@@ -30,6 +30,7 @@ fn main() {
     let dst = cmake.join().unwrap();
     let _ = toolchain.join();
 
+    println!("cargo:rustc-link-lib=stdc++");
     println!("cargo:rustc-link-search=native={}/build/lib", dst.display());
     println!("cargo:rustc-link-lib=static=binaryen");
     println!("cargo:rustc-link-lib=static=passes");
