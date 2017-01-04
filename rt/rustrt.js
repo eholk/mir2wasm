@@ -26,6 +26,7 @@ let module_handler = {
 };
 let proxy_ffi = new Proxy({}, module_handler);
 
-let foo = Wasm.instantiateModule(buffer, proxy_ffi);
+let module = new WebAssembly.Module(buffer);
+let instance = new WebAssembly.Instance(module, proxy_ffi);
 
-foo.exports.rust_entry();
+instance.exports.rust_entry();
