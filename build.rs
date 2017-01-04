@@ -54,6 +54,7 @@ fn main() {
     let dst = cmake.join().unwrap();
     toolchain.join().expect("Error downloading Wasm toolchain");
 
+    println!("cargo:rustc-link-lib=stdc++");
     println!("cargo:rustc-link-search=native={}/build/lib", dst.display());
     println!("cargo:rustc-link-lib=static=binaryen");
     println!("cargo:rustc-link-lib=static=passes");
