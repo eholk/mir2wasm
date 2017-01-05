@@ -32,7 +32,7 @@ pub struct WasmTransOptions {
     pub optimize: bool,
     pub interpret: bool,
     pub print: bool,
-    trace: bool,
+    pub trace: bool,
     pub binary_output_path: Option<String>,
 }
 
