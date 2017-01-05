@@ -777,7 +777,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 let wasm_start = self.generate_runtime_start(&entry_fn_name);
                 debug!("emitting wasm Start fn into entry_fn {:?}",
                        self.tcx.item_path_str(self.did));
-                //BinaryenSetStart(self.func.module.module, wasm_start);
+                BinaryenSetStart(self.func.module.module, wasm_start);
             }
         }
 
