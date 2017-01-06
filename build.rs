@@ -12,7 +12,7 @@ use std::thread;
 #[cfg(target_os="linux")]
 mod config {
     pub const DOWLOAD_WASM: bool = true;
-    pub const WASM_BUILD: &'static str = "9901";
+    pub const WASM_BUILD: &'static str = "14533";
     pub const OS_NAME: &'static str = "linux";
 }
 
