@@ -404,7 +404,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     // passed as i32s. A call to a function returning a struct will require
                     // preparing the output return value space on the caller function's frame, and
                     // the called function will write its return value there to avoid memcpys
-                    if let Some((b_func, b_fnty, call_kind, is_never)) = self.trans_fn_name_direct(func) {
+                    if let Some((b_func, b_fnty, call_kind, is_never)) =
+                        self.trans_fn_name_direct(func) {
                         let b_args: Vec<_> = args.iter().map(|a| self.trans_operand(a)).collect();
                         let b_call = match call_kind {
                             BinaryenCallKind::Direct => {
@@ -547,8 +548,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                             _ => {
                                 debug!("emitting Call to fn {:?}", func);
                                 if is_never {
-                                    //binaryen_stmts.push(b_call);
-                                    binaryen_stmts.push(BinaryenUnreachable(self.func.module.module));
+                                    // binaryen_stmts.push(b_call);
+                                    let unreachable = BinaryenUnreachable(self.func.module.module);
+                                    binaryen_stmts.push(unreachable);
                                 } else {
                                     binaryen_stmts.push(b_call);
                                 }
@@ -753,10 +755,6 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                                     prologue,
                                                     relooper_local.into(),
                                                     self.func.module.module);
-                // let body = BinaryenBlock(self.func.module.module,
-                //                         fn_name_ptr,
-                //                     [body, BinaryenUnreachable(self.func.module.module)].as_ptr(),
-                //                     BinaryenIndex(2));
 
                 // TODO(eholk): builderize this.
                 let var_types = self.func.binaryen_var_types();
@@ -1592,8 +1590,10 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                             };
 
                             let is_never = fn_sig.output.is_never() || fn_name == "panic";
-                            Some((self.fun_names[&(fn_did, fn_sig)].as_ptr(), ret_ty, call_kind,
-                        is_never))
+                            Some((self.fun_names[&(fn_did, fn_sig)].as_ptr(),
+                                  ret_ty,
+                                  call_kind,
+                                  is_never))
                         } else {
                             panic!("unimplemented ty {:?} for {:?}", ty, def_id);
                         }
