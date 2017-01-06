@@ -548,7 +548,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                             _ => {
                                 debug!("emitting Call to fn {:?}", func);
                                 if is_never {
-                                    // binaryen_stmts.push(b_call);
+                                    binaryen_stmts.push(b_call);
                                     let unreachable = BinaryenUnreachable(self.func.module.module);
                                     binaryen_stmts.push(unreachable);
                                 } else {
