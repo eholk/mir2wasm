@@ -8,10 +8,6 @@ extern crate mir2wasm;
 extern crate rustc;
 extern crate rustc_driver;
 
-// FIXME: C++ static linkage hacks. How do you do this for real?!
-#[link_args = "-lstdc++ -static-libstdc++"]
-extern "C" {}
-
 use getopts::{getopts, optflag, optopt};
 use mir2wasm::trans::{self, WasmTransOptions};
 use rustc::session::Session;
@@ -67,6 +63,7 @@ fn main() {
                  optopt("o", "", "write a binary wasm module to FILE", "FILE"),
                  optflag("O", "", "optimize the compiled wast module"),
                  optflag("q", "", "do not print the compiled wast module"),
+                 optflag("", "trace", "trace binaryen api calls"),
                  optflag("h", "help", "display this help message")];
 
     let mut rustc_args = Vec::new();
@@ -138,6 +135,9 @@ fn main() {
     }
     if matches.opt_present("q") {
         options.print = false;
+    }
+    if matches.opt_present("trace") {
+        options.trace = true;
     }
 
     let mut compiler_calls = WasmCompilerCalls::new(options);
