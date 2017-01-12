@@ -1724,11 +1724,14 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
 fn rust_ty_to_binaryen<'tcx>(t: Ty<'tcx>) -> BinaryenType {
     // FIXME zero-sized-types
+    if t.is_nil() || t.is_never() { return BinaryenNone(); }
+
     match t.sty {
         ty::TyFloat(FloatTy::F32) => BinaryenFloat32(),
         ty::TyFloat(FloatTy::F64) => BinaryenFloat64(),
         ty::TyInt(IntTy::I64) |
         ty::TyUint(UintTy::U64) => BinaryenInt64(),
+        // TODO: be explicit about all our types to avoid subtle bugs
         _ => BinaryenInt32(),
     }
 }
