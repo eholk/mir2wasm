@@ -15,8 +15,8 @@ pub fn resolve_trait_method<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
                                       def_id: DefId,
                                       substs: &'tcx Substs<'tcx>)
                                       -> (DefId, &'tcx Substs<'tcx>) {
-    let method_item = tcx.impl_or_trait_item(def_id);
-    let trait_id = method_item.container().id();
+    let method_item = tcx.associated_item(def_id);
+    let trait_id = method_item.container.id();
     let trait_ref = ty::Binder(ty::TraitRef::from_method(*tcx, trait_id, substs));
     match fulfill_obligation(tcx, trait_ref) {
         traits::VtableImpl(vtable_impl) => {
@@ -31,7 +31,7 @@ pub fn resolve_trait_method<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
         }
 
         traits::VtableClosure(vtable_closure) => {
-            (vtable_closure.closure_def_id, vtable_closure.substs.func_substs)
+            (vtable_closure.closure_def_id, vtable_closure.substs.substs)
         }
 
         traits::VtableFnPointer(_fn_ty) => {
@@ -65,7 +65,7 @@ fn fulfill_obligation<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
                                 -> traits::Vtable<'tcx, ()> {
     // Do the initial selection for the obligation. This yields the shallow result we are
     // looking for -- that is, what specific impl.
-    tcx.infer_ctxt(None, None, Reveal::All).enter(|infcx| {
+    tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
         let mut selcx = traits::SelectionContext::new(&infcx);
 
         let obligation = traits::Obligation::new(traits::ObligationCause::misc(DUMMY_SP,
@@ -109,7 +109,7 @@ fn fulfill_obligation<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
 
 #[derive(Debug)]
 struct ImplMethod<'tcx> {
-    method: Rc<ty::Method<'tcx>>,
+    method: ty::AssociatedItem,
     substs: &'tcx Substs<'tcx>,
     is_provided: bool,
 }
@@ -125,9 +125,9 @@ fn get_impl_method<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let trait_def_id = tcx.trait_id_of_impl(impl_def_id).unwrap();
     let trait_def = tcx.lookup_trait_def(trait_def_id);
 
-    match trait_def.ancestors(impl_def_id).fn_defs(tcx, name).next() {
+    match trait_def.ancestors(impl_def_id).defs(tcx, name, ty::AssociatedKind::Method).next() {
         Some(node_item) => {
-            let substs = tcx.infer_ctxt(None, None, Reveal::All).enter(|infcx| {
+            let substs = tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
                 let substs = traits::translate_substs(&infcx, impl_def_id, substs, node_item.node);
                 tcx.lift(&substs).unwrap_or_else(|| {
                     bug!("trans::meth::get_impl_method: translate_substs \

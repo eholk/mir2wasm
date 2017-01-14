@@ -1,14 +1,26 @@
 use libc::c_char;
 use error::*;
-use rustc::mir::repr::*;
-use rustc::mir::mir_map::MirMap;
+use rustc::mir::{Mir, Local};
+use rustc::mir::{
+    UnOp,
+    BinOp,
+    Literal,
+    Lvalue,
+    Operand,
+    ProjectionElem,
+    Rvalue,
+    AggregateKind,
+    CastKind,
+    StatementKind,
+    TerminatorKind,
+};
 use rustc::middle::const_val::ConstVal;
 use rustc_const_math::{ConstInt, ConstIsize};
 use rustc::ty::{self, TyCtxt, Ty, FnSig};
 use rustc::ty::layout::{self, Layout, Size};
 use rustc::ty::subst::Substs;
-use rustc::hir::intravisit::{self, Visitor, FnKind};
-use rustc::hir::{FnDecl, Block};
+use rustc::hir::intravisit::{self, Visitor, FnKind, NestedVisitorMap};
+use rustc::hir::{FnDecl, BodyId};
 use rustc::hir::def_id::DefId;
 use rustc::traits::Reveal;
 use syntax::ast::{NodeId, IntTy, UintTy, FloatTy};
@@ -22,6 +34,7 @@ use std::path::Path;
 use std::ptr;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::cell::RefCell;
 use binaryen::*;
 use monomorphize;
 use traits;
@@ -49,7 +62,6 @@ impl WasmTransOptions {
 }
 
 pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
-                             mir_map: &MirMap<'tcx>,
                              entry_fn: Option<NodeId>,
                              options: &WasmTransOptions)
                              -> Result<()> {
@@ -62,7 +74,6 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
 
     let ref mut v = BinaryenModuleCtxt {
         tcx: tcx,
-        mir_map: mir_map,
         module: builder::Module::new(),
         entry_fn: entry_fn,
         fun_types: HashMap::new(),
@@ -85,7 +96,10 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
                           BinaryenIndex(0));
     }
 
+    // TODO determine correct crate-visiting semantics
     tcx.map.krate().visit_all_items(v);
+    // tcx.visit_all_item_likes_in_krate(DepNode::Mir, v);
+    // intravisit::walk_crate(v, tcx.map.krate());
 
     assert!(v.module.is_valid(),
             "Internal compiler error: invalid generated module");
@@ -119,7 +133,6 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
 
 struct BinaryenModuleCtxt<'v, 'tcx: 'v> {
     tcx: &'v TyCtxt<'v, 'tcx, 'tcx>,
-    mir_map: &'v MirMap<'tcx>,
     module: builder::Module,
     entry_fn: Option<NodeId>,
     fun_types: HashMap<ty::FnSig<'tcx>, BinaryenFunctionTypeRef>,
@@ -158,23 +171,28 @@ impl<'v, 'tcx: 'v> BinaryenModuleCtxt<'v, 'tcx> {
 const STACK_POINTER_ADDRESS: i32 = 0;
 
 impl<'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx> {
-    fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v FnDecl, b: &'v Block, s: Span, id: NodeId) {
+    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
+        panic!("TODO determine visiting semantics");
+    }
+
+    fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v FnDecl, b: BodyId, s: Span, id: NodeId) {
         let did = self.tcx.map.local_def_id(id);
-        let type_scheme = self.tcx.lookup_item_type(did);
-        let generics = &type_scheme.generics;
+
+        let generics = self.tcx.item_generics(did);
 
         // don't translate generic functions yet
         if generics.types.len() + generics.parent_types as usize > 0 {
             return;
         }
 
-        let mir = &self.mir_map.map[&did];
-        let sig = type_scheme.ty.fn_sig().skip_binder();
+        let mir = {
+            self.tcx.mir_map.borrow()[&did]
+        };
 
+        let sig = self.tcx.item_type(did).fn_sig().skip_binder();
         {
             let mut ctxt = BinaryenFnCtxt {
                 tcx: self.tcx,
-                mir_map: self.mir_map,
                 mir: mir,
                 did: did,
                 sig: &sig,
@@ -198,8 +216,7 @@ impl<'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx> {
 
 struct BinaryenFnCtxt<'v, 'tcx: 'v, 'module> {
     tcx: &'v TyCtxt<'v, 'tcx, 'tcx>,
-    mir_map: &'v MirMap<'tcx>,
-    mir: &'v Mir<'tcx>,
+    mir: &'v RefCell<Mir<'tcx>>,
     did: DefId,
     sig: &'v FnSig<'tcx>,
     func: builder::Fn<'module>,
@@ -217,6 +234,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     /// This is the main entry point for MIR->wasm fn translation
     fn trans(&'module mut self) {
 
+        let mir = self.mir.borrow();
+
         // Maintain a cache of translated monomorphizations and bail
         // if we've already seen this one.
         let fn_name_ptr;
@@ -232,11 +251,11 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         debug!("translating fn {:?}", self.tcx.item_path_str(self.did));
 
         // Translate arg and ret tys to wasm
-        for ty in &self.sig.inputs {
+        for ty in self.sig.inputs() {
             self.func.add_arg(rust_ty_to_builder(ty).unwrap());
         }
         let mut needs_ret_var = false;
-        let ret_ty = self.sig.output;
+        let ret_ty = self.sig.output();
         debug!("ret_ty is {:?}", ret_ty);
         let binaryen_ret = if !ret_ty.is_nil() && !ret_ty.is_never() {
             needs_ret_var = true;
@@ -249,9 +268,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         // Create the wasm vars.
         // Params and vars form the list of locals, both sharing the same index space.
 
-        for mir_var in &self.mir.var_decls {
+        for mir_var in mir.vars_iter() {
             debug!("adding local {:?}", mir_var);
-            match rust_ty_to_builder(mir_var.ty) {
+            match rust_ty_to_builder(mir.local_decls[mir_var].ty) {
                 Some(ty) => {
                     let var = self.func.create_local(ty).index();
                     self.var_map.push(Some(var))
@@ -260,9 +279,10 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             }
         }
 
-        for mir_var in &self.mir.temp_decls {
+        for mir_var in mir.temps_iter() {
             debug!("adding {:?}", mir_var);
-            let ty = rust_ty_to_builder(mir_var.ty).map(|ty| self.func.create_local(ty).index());
+            let ty = rust_ty_to_builder(mir.local_decls[mir_var].ty)
+                .map(|ty| self.func.create_local(ty).index());
             debug!("type is {:?}", &ty);
             self.temp_map.push(ty);
         }
@@ -284,12 +304,12 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         assert!(self.func.get_var(checked_op_local).ty() == builder::ReprType::Int64);
         self.checked_op_local = Some(checked_op_local.into());
 
-        let locals_count = self.sig.inputs.len() + self.func.num_locals();
+        let locals_count = self.sig.inputs().len() + self.func.num_locals();
         debug!(concat!("{} wasm locals initially found - params: {}, vars: {} ",
                        "(incl. stack pointer helper ${}, relooper helper ${}, ",
                        "checked operation helper ${})"),
                locals_count,
-               self.sig.inputs.len(),
+               self.sig.inputs().len(),
                self.func.num_vars(),
                stack_pointer_local.index(),
                relooper_local.index(),
@@ -304,9 +324,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         let mut relooper_blocks = Vec::new();
 
         debug!("{} MIR basic blocks to translate",
-               self.mir.basic_blocks().len());
+               mir.basic_blocks().len());
 
-        for (i, bb) in self.mir.basic_blocks().iter().enumerate() {
+        for (i, bb) in mir.basic_blocks().iter().enumerate() {
             debug!("bb{}: {:#?}", i, bb);
 
             let mut binaryen_stmts = Vec::new();
@@ -351,14 +371,15 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     let expr = if ret_ty.is_nil() {
                         BinaryenExpressionRef(ptr::null_mut())
                     } else {
-                        self.trans_operand(&Operand::Consume(Lvalue::ReturnPointer))
+                        // Local 0 is guaranteed to be return pointer
+                        self.trans_operand(&Operand::Consume(Lvalue::Local(Local::new(0))))
                     };
                     let expr = unsafe { BinaryenReturn(self.func.module.module, expr) };
                     binaryen_stmts.push(expr);
                 }
                 TerminatorKind::Switch { ref discr, .. } => {
                     let adt = self.trans_lval(discr).unwrap();
-                    let adt_ty = discr.ty(self.mir, *self.tcx).to_ty(*self.tcx);
+                    let adt_ty = discr.ty(&*mir, *self.tcx).to_ty(*self.tcx);
 
                     if adt.offset.is_some() {
                         panic!("unimplemented Switch with offset");
@@ -434,7 +455,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     binaryen_stmts.push(b_call);
                                 } else {
                                     let dest = self.trans_lval(lvalue).unwrap();
-                                    let dest_ty = lvalue.ty(self.mir, *self.tcx).to_ty(*self.tcx);
+                                    let dest_ty = lvalue.ty(&*mir, *self.tcx).to_ty(*self.tcx);
                                     let dest_layout = self.type_layout(dest_ty);
 
                                     match *dest_layout {
@@ -577,7 +598,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         }
 
         // Create the relooper edges from the bb terminators
-        for (i, bb) in self.mir.basic_blocks().iter().enumerate() {
+        for (i, bb) in mir.basic_blocks().iter().enumerate() {
             match bb.terminator().kind {
                 TerminatorKind::Goto { ref target } => {
                     debug!("emitting Branch for Goto, from bb{} to bb{}",
@@ -639,7 +660,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                         let labels = variants.iter()
                             .map(|&v| {
                                 let discr_val =
-                                    adt_def.variants[v].disr_val.to_u64_unchecked() as u32;
+                                    adt_def.variants[v].disr_val.to_u32()
+                                        .expect("unimplemented: enum discriminant size > u32 ");
                                 BinaryenIndex(discr_val)
                             })
                             .collect::<Vec<_>>();
@@ -763,7 +785,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             }
 
             if self.entry_fn == Some(nid) {
-                let is_start = self.mir.arg_decls.len() == 2;
+                let is_start = mir.arg_count == 2;
                 let entry_fn_name = if is_start { "start" } else { "main" };
                 let wasm_start = self.generate_runtime_start(&entry_fn_name);
                 debug!("emitting wasm Start fn into entry_fn {:?}",
@@ -780,6 +802,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                         lvalue: &Lvalue<'tcx>,
                         rvalue: &Rvalue<'tcx>,
                         statements: &mut Vec<BinaryenExpressionRef>) {
+        let mir = self.mir.borrow();
+
         let dest = match self.trans_lval(lvalue) {
             Some(dest) => dest,
             None => {
@@ -791,7 +815,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 return;
             }
         };
-        let dest_ty = lvalue.ty(self.mir, *self.tcx).to_ty(*self.tcx);
+        let dest_ty = lvalue.ty(&*mir, *self.tcx).to_ty(*self.tcx);
 
         let dest_layout = self.type_layout(dest_ty);
 
@@ -1048,7 +1072,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                 statements.push(allocation);
 
                                 let offsets = ::std::iter::once(0)
-                                    .chain(variant.offset_after_field.iter().map(|s| s.bytes()));
+                                    .chain(variant.offsets.iter().map(|s| s.bytes()));
                                 debug!("emitting Stores for struct '{:?}' fields, values: {:?}",
                                        adt_def,
                                        operands);
@@ -1092,7 +1116,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                            adt_def,
                                            operands);
                                     let offsets = variants[variant]
-                                        .offset_after_field
+                                        .offsets
                                         .iter()
                                         .map(|s| s.bytes());
                                     self.emit_assign_fields(offsets, operands, statements);
@@ -1112,7 +1136,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     // TODO: handle signed vs unsigned here as well, or just in the
                                     // BinOps ?
                                     let discr_val = adt_def.variants[variant].disr_val;
-                                    let discr_val = discr_val.to_u64_unchecked() as i32;
+                                    let discr_val = discr_val.to_u32().unwrap();
 
                                     // set enum discr
                                     unsafe {
@@ -1124,7 +1148,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                                discr_val);
                                         let discr_val =
                                             BinaryenConst(self.func.module.module,
-                                                          BinaryenLiteralInt32(discr_val));
+                                                          BinaryenLiteralInt32(discr_val as i32));
                                         let write_discr = BinaryenSetLocal(self.func.module.module,
                                                                            dest.index,
                                                                            discr_val);
@@ -1162,7 +1186,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     statements.push(allocation);
 
                                     let offsets = ::std::iter::once(0)
-                                        .chain(variant.offset_after_field
+                                        .chain(variant.offsets
                                             .iter()
                                             .map(|s| s.bytes()));
                                     debug!("emitting Stores for tuple fields, values: {:?}",
@@ -1190,7 +1214,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 match *kind {
                     CastKind::Misc => {
                         let src = self.trans_operand(operand);
-                        let src_ty = operand.ty(self.mir, *self.tcx);
+                        let src_ty = operand.ty(&*mir, *self.tcx);
                         let src_layout = self.type_layout(src_ty);
 
                         // TODO: handle more of the casts (miri doesn't really handle every Misc
@@ -1284,6 +1308,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         }
     }
 
+    // TODO this function changed from being passed offsets-after-field to offsets-of-field...
+    // but I suspect it still does the right thing - emit a store for every field.
+    // Did it miss the first field and emit after the last field of the struct before?
     fn emit_assign_fields<I>(&mut self,
                              offsets: I,
                              operands: &[Operand<'tcx>],
@@ -1294,7 +1321,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             let read_sp = self.emit_read_sp();
 
             for (offset, operand) in offsets.into_iter().zip(operands) {
-                // let operand_ty = self.mir.operand_ty(*self.tcx, operand);
+                // let operand_ty = mir.operand_ty(*self.tcx, operand);
                 // TODO: match on the operand_ty to know how many bytes to store, not just i32s
                 let src = self.trans_operand(operand);
                 let write_field = BinaryenStore(self.func.module.module,
@@ -1310,25 +1337,12 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     }
 
     fn trans_lval(&mut self, lvalue: &Lvalue<'tcx>) -> Option<BinaryenLvalue> {
+        let mir = self.mir.borrow();
+
         let i = match *lvalue {
-            Lvalue::Arg(i) => i.index() as u32,
-            Lvalue::Var(i) => {
+            Lvalue::Local(i) => {
                 match self.var_map[i.index()] {
-                    Some(i) => i as u32,
-                    None => return None,
-                }
-            }
-            Lvalue::Temp(i) => {
-                match self.temp_map[i.index()] {
-                    Some(i) => i as u32,
-                    None => return None,
-                }
-            }
-            Lvalue::ReturnPointer => {
-                debug!("Translating ret_var lval. self.ret_var = {:?}",
-                       self.ret_var);
-                match self.ret_var {
-                    Some(x) => x.index() as u32,
+                    Some(i) => i.index() as u32,
                     None => return None,
                 }
             }
@@ -1337,7 +1351,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     Some(base) => base,
                     None => return None,
                 };
-                let base_ty = projection.base.ty(self.mir, *self.tcx).to_ty(*self.tcx);
+                let base_ty = projection.base.ty(&*mir, *self.tcx).to_ty(*self.tcx);
                 let base_layout = self.type_layout(base_ty);
 
                 match projection.elem {
@@ -1360,7 +1374,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                             _ => panic!("unimplemented Field Projection: {:?}", projection),
                         };
 
-                        let offset = variant.field_offset(field.index()).bytes() as u32;
+                        let offset = variant.offsets[field.index()].bytes() as u32;
                         return Some(BinaryenLvalue::new(base.index,
                                                         base.offset,
                                                         LvalueExtra::None)
@@ -1390,6 +1404,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     }
 
     fn trans_operand(&mut self, operand: &Operand<'tcx>) -> BinaryenExpressionRef {
+        let mir = self.mir.borrow();
+
         match *operand {
             Operand::Consume(ref lvalue) => {
                 let binaryen_lvalue = match self.trans_lval(lvalue) {
@@ -1399,7 +1415,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                         return unsafe { BinaryenUnreachable(self.func.module.module) };
                     }
                 };
-                let lval_ty = lvalue.ty(self.mir, *self.tcx);
+                let lval_ty = lvalue.ty(&*mir, *self.tcx);
                 let t = lval_ty.to_ty(*self.tcx);
                 let t = rust_ty_to_binaryen(t);
 
@@ -1461,7 +1477,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
     #[inline]
     fn type_size(&self, ty: Ty<'tcx>) -> usize {
-        let substs = Substs::empty(*self.tcx);
+        let substs = Substs::empty();
         self.type_size_with_substs(ty, substs)
     }
 
@@ -1473,7 +1489,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
     #[inline]
     fn type_layout(&self, ty: Ty<'tcx>) -> &'tcx Layout {
-        let substs = Substs::empty(*self.tcx);
+        let substs = Substs::empty();
         self.type_layout_with_substs(ty, substs)
     }
 
@@ -1482,7 +1498,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         // TODO(solson): Is this inefficient? Needs investigation.
         let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
 
-        self.tcx.infer_ctxt(None, None, Reveal::All).enter(|infcx| {
+        self.tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
             // TODO(solson): Report this error properly.
             ty.layout(&infcx).unwrap()
         })
@@ -1495,7 +1511,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             Operand::Constant(ref c) => {
                 match c.literal {
                     Literal::Item { def_id, ref substs } => {
-                        let ty = self.tcx.lookup_item_type(def_id).ty;
+                        let ty = self.tcx.item_type(def_id);
                         if ty.is_fn() {
                             assert!(def_id.is_local());
                             let sig = ty.fn_sig().skip_binder();
@@ -1521,7 +1537,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     } else {
                                         let (resolved_def_id, resolved_substs) =
                                             traits::resolve_trait_method(self.tcx, fn_did, substs);
-                                        let ty = self.tcx.lookup_item_type(resolved_def_id).ty;
+                                        let ty = self.tcx.item_type(resolved_def_id);
                                         // TODO: investigate rustc trans use of
                                         // liberate_bound_regions or similar here
                                         let sig = ty.fn_sig().skip_binder();
@@ -1530,7 +1546,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                         (resolved_substs, sig)
                                     };
 
-                                    let mir = &self.mir_map.map[&fn_did];
+                                    let mir = {
+                                        self.tcx.mir_map.borrow()[&fn_did]
+                                    };
 
                                     fn_sig =
                                         monomorphize::apply_param_substs(self.tcx, substs, sig);
@@ -1550,7 +1568,6 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     if !self.fun_names.contains_key(&(fn_did, fn_sig.clone())) {
                                         let mut ctxt = BinaryenFnCtxt {
                                             tcx: self.tcx,
-                                            mir_map: self.mir_map,
                                             mir: mir,
                                             did: fn_did,
                                             sig: &fn_sig,
@@ -1576,8 +1593,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                 }
                             }
 
-                            let ret_ty = if !fn_sig.output.is_nil() {
-                                rust_ty_to_binaryen(fn_sig.output)
+                            let ret_ty = if !fn_sig.output().is_nil() {
+                                rust_ty_to_binaryen(fn_sig.output())
                             } else {
                                 BinaryenNone()
                             };
@@ -1649,7 +1666,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 entry_fn_call = BinaryenDrop(self.func.module.module, call);
             } else {
                 assert!(entry_fn == "main");
-                assert!(self.sig.output.is_nil());
+                assert!(self.sig.output().is_nil());
                 entry_fn_call = BinaryenCall(self.func.module.module,
                                              entry_fn_name.as_ptr(),
                                              ptr::null(),
@@ -1807,20 +1824,6 @@ impl IntegerExt for layout::Integer {
             I16 => Size::from_bits(16),
             I32 => Size::from_bits(32),
             I64 => Size::from_bits(64),
-        }
-    }
-}
-
-trait StructExt {
-    fn field_offset(&self, index: usize) -> Size;
-}
-
-impl StructExt for layout::Struct {
-    fn field_offset(&self, index: usize) -> Size {
-        if index == 0 {
-            Size::from_bytes(0)
-        } else {
-            self.offset_after_field[index - 1]
         }
     }
 }
