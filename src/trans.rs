@@ -547,12 +547,10 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                             }
                             _ => {
                                 debug!("emitting Call to fn {:?}", func);
+                                binaryen_stmts.push(b_call);
                                 if is_never {
-                                    binaryen_stmts.push(b_call);
                                     let unreachable = BinaryenUnreachable(self.func.module.module);
                                     binaryen_stmts.push(unreachable);
-                                } else {
-                                    binaryen_stmts.push(b_call);
                                 }
                             }
                         }
@@ -1629,8 +1627,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             //        track its initial size, etc and extract that into its own abstraction
             //     -> temporarily, just ask for one 64K page
             BinaryenSetMemory(self.func.module.module,
-                              BinaryenIndex(1024),
-                              BinaryenIndex(1024),
+                              BinaryenIndex(1),
+                              BinaryenIndex(1),
                               ptr::null(),
                               ptr::null(),
                               ptr::null(),
@@ -1724,7 +1722,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
 fn rust_ty_to_binaryen<'tcx>(t: Ty<'tcx>) -> BinaryenType {
     // FIXME zero-sized-types
-    if t.is_nil() || t.is_never() { return BinaryenNone(); }
+    if t.is_nil() || t.is_never() {
+        return BinaryenNone();
+    }
 
     match t.sty {
         ty::TyFloat(FloatTy::F32) => BinaryenFloat32(),
