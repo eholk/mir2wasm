@@ -19,7 +19,7 @@ mod config {
 #[cfg(target_os="macos")]
 mod config {
     pub const DOWLOAD_WASM: bool = true;
-    pub const WASM_BUILD: &'static str = "2345";
+    pub const WASM_BUILD: &'static str = "2670";
     pub const OS_NAME: &'static str = "mac";
 }
 
