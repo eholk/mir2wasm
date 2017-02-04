@@ -12,10 +12,10 @@ pub fn apply_param_substs<'a, 'tcx, T>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
     tcx.normalize_associated_type(&substituted)
 }
 
-pub fn apply_ty_substs<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
-                                 ty_substs: &Substs<'tcx>,
-                                 ty: Ty<'tcx>)
-                                 -> Ty<'tcx> {
-    let substituted = ty.subst(*tcx, ty_substs);
-    tcx.normalize_associated_type(&substituted)
-}
+// pub fn apply_ty_substs<'a, 'gcx: 'a + 'tcx, 'tcx>(tcx: &TyCtxt<'a, 'gcx, 'tcx>,
+//                                  ty_substs: &Substs<'tcx>,
+//                                  ty: Ty<'tcx>)
+//                                  -> Ty<'tcx> {
+//     let substituted = ty.subst(*tcx, ty_substs);
+//     tcx.normalize_associated_type(&substituted)
+// }
