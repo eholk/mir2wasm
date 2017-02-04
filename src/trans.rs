@@ -425,7 +425,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     // passed as i32s. A call to a function returning a struct will require
                     // preparing the output return value space on the caller function's frame, and
                     // the called function will write its return value there to avoid memcpys
-                    if let Some((b_func, b_fnty, call_kind)) = self.trans_fn_name_direct(func) {
+                    if let Some((b_func, b_fnty, call_kind, is_never)) =
+                        self.trans_fn_name_direct(func) {
                         let b_args: Vec<_> = args.iter().map(|a| self.trans_operand(a)).collect();
                         let b_call = match call_kind {
                             BinaryenCallKind::Direct => {
@@ -568,6 +569,10 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                             _ => {
                                 debug!("emitting Call to fn {:?}", func);
                                 binaryen_stmts.push(b_call);
+                                if is_never {
+                                    let unreachable = BinaryenUnreachable(self.func.module.module);
+                                    binaryen_stmts.push(unreachable);
+                                }
                             }
                         }
                     } else {
@@ -1506,7 +1511,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
     fn trans_fn_name_direct(&mut self,
                             operand: &Operand<'tcx>)
-                            -> Option<(*const c_char, BinaryenType, BinaryenCallKind)> {
+                            -> Option<(*const c_char, BinaryenType, BinaryenCallKind, bool)> {
         match *operand {
             Operand::Constant(ref c) => {
                 match c.literal {
@@ -1599,7 +1604,11 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                 BinaryenNone()
                             };
 
-                            Some((self.fun_names[&(fn_did, fn_sig)].as_ptr(), ret_ty, call_kind))
+                            let is_never = fn_sig.output.is_never() || fn_name == "panic";
+                            Some((self.fun_names[&(fn_did, fn_sig)].as_ptr(),
+                                  ret_ty,
+                                  call_kind,
+                                  is_never))
                         } else {
                             panic!("unimplemented ty {:?} for {:?}", ty, def_id);
                         }
@@ -1730,11 +1739,16 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
 fn rust_ty_to_binaryen<'tcx>(t: Ty<'tcx>) -> BinaryenType {
     // FIXME zero-sized-types
+    if t.is_nil() || t.is_never() {
+        return BinaryenNone();
+    }
+
     match t.sty {
         ty::TyFloat(FloatTy::F32) => BinaryenFloat32(),
         ty::TyFloat(FloatTy::F64) => BinaryenFloat64(),
         ty::TyInt(IntTy::I64) |
         ty::TyUint(UintTy::U64) => BinaryenInt64(),
+        // TODO: be explicit about all our types to avoid subtle bugs
         _ => BinaryenInt32(),
     }
 }
