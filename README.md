@@ -9,12 +9,12 @@ An experimental compiler from [Rust] to [WebAssembly], based on rustc + Rust [MI
 I recommend that you install [rustup] and then use it to
 install the current rustc nightly version:
 
-**Tested with nightly-2016-09-29**
+**Tested with nightly-2017-01-13**
 
 ```sh
 git clone https://github.com/brson/mir2wasm.git
 cd mir2wasm
-rustup override set nightly-2016-09-29
+rustup override set nightly-2017-01-13
 ```
 
 ```sh

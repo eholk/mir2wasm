@@ -44,7 +44,6 @@ impl<'a> CompilerCalls<'a> for WasmCompilerCalls {
                 None
             };
             trans::trans_crate(&state.tcx.unwrap(),
-                               state.mir_map.unwrap(),
                                entry_fn,
                                &options)
                 .expect("error translating crate");
@@ -141,7 +140,7 @@ fn main() {
     }
 
     let mut compiler_calls = WasmCompilerCalls::new(options);
-    match rustc_driver::run_compiler(&rustc_args, &mut compiler_calls) {
+    match rustc_driver::run_compiler(&rustc_args, &mut compiler_calls, None, None) {
         (Ok(_), _) => process::exit(0),
         (Err(code), _) => process::exit(code as i32),
     }

@@ -97,9 +97,9 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
     }
 
     // TODO determine correct crate-visiting semantics
-    tcx.map.krate().visit_all_items(v);
-    // tcx.visit_all_item_likes_in_krate(DepNode::Mir, v);
-    // intravisit::walk_crate(v, tcx.map.krate());
+    //tcx.map.krate().visit_all_items(v);
+    //tcx.visit_all_item_likes_in_krate(DepNode::Mir, v);
+    intravisit::walk_crate(v, tcx.map.krate());
 
     assert!(v.module.is_valid(),
             "Internal compiler error: invalid generated module");
@@ -1604,7 +1604,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                 BinaryenNone()
                             };
 
-                            let is_never = fn_sig.output.is_never() || fn_name == "panic";
+                            let is_never = fn_sig.output().is_never() || fn_name == "panic";
                             Some((self.fun_names[&(fn_did, fn_sig)].as_ptr(),
                                   ret_ty,
                                   call_kind,
@@ -1838,6 +1838,7 @@ impl IntegerExt for layout::Integer {
             I16 => Size::from_bits(16),
             I32 => Size::from_bits(32),
             I64 => Size::from_bits(64),
+            I128 => panic!("i128 is not yet supported")
         }
     }
 }
