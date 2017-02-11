@@ -18,7 +18,7 @@ use rustc::middle::const_val::ConstVal;
 use rustc_const_math::{ConstInt, ConstIsize};
 use rustc::ty::{self, TyCtxt, Ty, FnSig};
 use rustc::ty::layout::{self, Layout, Size};
-use rustc::ty::subst::{Subst, Substs};
+use rustc::ty::subst::Substs;
 use rustc::hir::intravisit::{self, Visitor, FnKind, NestedVisitorMap};
 use rustc::hir::{FnDecl, BodyId};
 use rustc::hir::def_id::DefId;
@@ -61,7 +61,7 @@ impl WasmTransOptions {
     }
 }
 
-pub fn trans_crate<'a, 'gcx, 'tcx>(tcx: &TyCtxt<'a, 'gcx, 'tcx>,
+pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
                              entry_fn: Option<NodeId>,
                              options: &WasmTransOptions)
                              -> Result<()> {
@@ -131,8 +131,8 @@ pub fn trans_crate<'a, 'gcx, 'tcx>(tcx: &TyCtxt<'a, 'gcx, 'tcx>,
     Ok(())
 }
 
-struct BinaryenModuleCtxt<'v, 'gcx: 'v + 'tcx, 'tcx: 'v> {
-    tcx: &'v TyCtxt<'v, 'gcx, 'tcx>,
+struct BinaryenModuleCtxt<'v, 'tcx: 'v> {
+    tcx: &'v TyCtxt<'v, 'tcx, 'tcx>,
     module: builder::Module,
     entry_fn: Option<NodeId>,
     fun_types: HashMap<ty::FnSig<'tcx>, BinaryenFunctionTypeRef>,
@@ -140,7 +140,7 @@ struct BinaryenModuleCtxt<'v, 'gcx: 'v + 'tcx, 'tcx: 'v> {
     c_strings: Vec<CString>,
 }
 
-impl<'v, 'gcx: 'v + 'tcx, 'tcx: 'v> BinaryenModuleCtxt<'v, 'gcx, 'tcx> {
+impl<'v, 'tcx: 'v> BinaryenModuleCtxt<'v, 'tcx> {
     fn serialize(&self) -> Vec<u8> {
         unsafe {
             // TODO: find a way to determine the size of the buffer
@@ -170,9 +170,9 @@ impl<'v, 'gcx: 'v + 'tcx, 'tcx: 'v> BinaryenModuleCtxt<'v, 'gcx, 'tcx> {
 // TODO: investigate where should the preferred location be
 const STACK_POINTER_ADDRESS: i32 = 0;
 
-impl<'v, 'gcx: 'v + 'tcx, 'tcx: 'v> Visitor<'v> for BinaryenModuleCtxt<'v, 'gcx, 'tcx> {
+impl<'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx> {
     fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
-        NestedVisitorMap::All(&self.tcx.map)
+        panic!("TODO determine visiting semantics");
     }
 
     fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v FnDecl, b: BodyId, s: Span, id: NodeId) {
@@ -214,9 +214,9 @@ impl<'v, 'gcx: 'v + 'tcx, 'tcx: 'v> Visitor<'v> for BinaryenModuleCtxt<'v, 'gcx,
     }
 }
 
-struct BinaryenFnCtxt<'v, 'gcx: 'v + 'tcx, 'tcx: 'v, 'module> {
-    tcx: &'v TyCtxt<'v, 'gcx, 'tcx>,
-    mir: &'v RefCell<Mir<'gcx>>,
+struct BinaryenFnCtxt<'v, 'tcx: 'v, 'module> {
+    tcx: &'v TyCtxt<'v, 'tcx, 'tcx>,
+    mir: &'v RefCell<Mir<'tcx>>,
     did: DefId,
     sig: &'v FnSig<'tcx>,
     func: builder::Fn<'module>,
@@ -230,7 +230,7 @@ struct BinaryenFnCtxt<'v, 'gcx: 'v + 'tcx, 'tcx: 'v, 'module> {
     ret_var: Option<usize>,
 }
 
-impl<'v, 'gcx: 'v + 'tcx, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 'module> {
+impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     /// This is the main entry point for MIR->wasm fn translation
     fn trans(&'module mut self) {
 
@@ -1501,8 +1501,7 @@ impl<'v, 'gcx: 'v + 'tcx, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 
     // Imported from miri and slightly modified to adapt to our monomorphize api
     fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &'tcx Substs<'tcx>) -> &'tcx Layout {
         // TODO(solson): Is this inefficient? Needs investigation.
-        //let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
-        let ty = self.tcx.normalize_associated_type(&ty.subst(*self.tcx, substs));
+        let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
 
         self.tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
             // TODO(solson): Report this error properly.
@@ -1511,7 +1510,7 @@ impl<'v, 'gcx: 'v + 'tcx, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 
     }
 
     fn trans_fn_name_direct(&mut self,
-                            operand: &Operand<'gcx>)
+                            operand: &Operand<'tcx>)
                             -> Option<(*const c_char, BinaryenType, BinaryenCallKind, bool)> {
         match *operand {
             Operand::Constant(ref c) => {
