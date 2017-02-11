@@ -172,7 +172,7 @@ const STACK_POINTER_ADDRESS: i32 = 0;
 
 impl<'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx> {
     fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
-        panic!("TODO determine visiting semantics");
+        NestedVisitorMap::None        
     }
 
     fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v FnDecl, b: BodyId, s: Span, id: NodeId) {
