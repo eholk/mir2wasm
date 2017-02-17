@@ -14,6 +14,7 @@ use rustc::mir::{
     StatementKind,
     TerminatorKind,
 };
+use rustc::dep_graph::DepNode;
 use rustc::middle::const_val::ConstVal;
 use rustc_const_math::{ConstInt, ConstIsize};
 use rustc::ty::{self, TyCtxt, Ty, FnSig};
@@ -98,8 +99,8 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
 
     // TODO determine correct crate-visiting semantics
     //tcx.map.krate().visit_all_items(v);
-    //tcx.visit_all_item_likes_in_krate(DepNode::Mir, v);
-    intravisit::walk_crate(v, tcx.map.krate());
+    tcx.visit_all_item_likes_in_krate(DepNode::Mir, &mut v.as_deep_visitor());
+    //intravisit::walk_crate(v, tcx.map.krate());
 
     assert!(v.module.is_valid(),
             "Internal compiler error: invalid generated module");
@@ -172,7 +173,7 @@ const STACK_POINTER_ADDRESS: i32 = 0;
 
 impl<'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx> {
     fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
-        NestedVisitorMap::None        
+        NestedVisitorMap::None
     }
 
     fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v FnDecl, b: BodyId, s: Span, id: NodeId) {
