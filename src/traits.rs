@@ -11,21 +11,21 @@ use syntax::codemap::DUMMY_SP;
 // The following is 99% from Miri (terminator.rs), with error handling from rustc trans
 
 /// Trait method, which has to be resolved to an impl method.
-pub fn resolve_trait_method<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
+pub fn resolve_trait_method<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                       def_id: DefId,
                                       substs: &'tcx Substs<'tcx>)
                                       -> (DefId, &'tcx Substs<'tcx>) {
     let method_item = tcx.associated_item(def_id);
     let trait_id = method_item.container.id();
-    let trait_ref = ty::Binder(ty::TraitRef::from_method(*tcx, trait_id, substs));
+    let trait_ref = ty::Binder(ty::TraitRef::from_method(tcx, trait_id, substs));
     match fulfill_obligation(tcx, trait_ref) {
         traits::VtableImpl(vtable_impl) => {
             let impl_did = vtable_impl.impl_def_id;
             let mname = tcx.item_name(def_id);
             // Create a concatenated set of substitutions which includes those from the impl
             // and those from the method:
-            let substs = substs.rebase_onto(*tcx, trait_id, vtable_impl.substs);
-            let mth = get_impl_method(*tcx, impl_did, substs, mname);
+            let substs = substs.rebase_onto(tcx, trait_id, vtable_impl.substs);
+            let mth = get_impl_method(tcx, impl_did, substs, mname);
 
             (mth.method.def_id, mth.substs)
         }
@@ -60,7 +60,7 @@ pub fn resolve_trait_method<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
     }
 }
 
-fn fulfill_obligation<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
+fn fulfill_obligation<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                 trait_ref: ty::PolyTraitRef<'tcx>)
                                 -> traits::Vtable<'tcx, ()> {
     // Do the initial selection for the obligation. This yields the shallow result we are

@@ -62,7 +62,7 @@ impl WasmTransOptions {
     }
 }
 
-pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
+pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'a, 'tcx>,
                              entry_fn: Option<NodeId>,
                              options: &WasmTransOptions)
                              -> Result<()> {
@@ -73,7 +73,7 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
         unsafe { BinaryenSetAPITracing(true) }
     }
 
-    let ref mut v = BinaryenModuleCtxt {
+    let mut v = BinaryenModuleCtxt {
         tcx: tcx,
         module: builder::Module::new(),
         entry_fn: entry_fn,
@@ -132,8 +132,8 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
     Ok(())
 }
 
-struct BinaryenModuleCtxt<'v, 'tcx: 'v> {
-    tcx: &'v TyCtxt<'v, 'tcx, 'tcx>,
+struct BinaryenModuleCtxt<'v, 'gcx: 'tcx + 'v, 'tcx: 'v> {
+    tcx: TyCtxt<'v, 'gcx, 'tcx>,
     module: builder::Module,
     entry_fn: Option<NodeId>,
     fun_types: HashMap<ty::FnSig<'tcx>, BinaryenFunctionTypeRef>,
@@ -141,7 +141,7 @@ struct BinaryenModuleCtxt<'v, 'tcx: 'v> {
     c_strings: Vec<CString>,
 }
 
-impl<'v, 'tcx: 'v> BinaryenModuleCtxt<'v, 'tcx> {
+impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v> BinaryenModuleCtxt<'v, 'gcx, 'tcx> {
     fn serialize(&self) -> Vec<u8> {
         unsafe {
             // TODO: find a way to determine the size of the buffer
@@ -171,7 +171,7 @@ impl<'v, 'tcx: 'v> BinaryenModuleCtxt<'v, 'tcx> {
 // TODO: investigate where should the preferred location be
 const STACK_POINTER_ADDRESS: i32 = 0;
 
-impl<'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx> {
+impl<'v, 'gcx: 'tcx + 'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'gcx, 'tcx> {
     fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
         NestedVisitorMap::None
     }
@@ -215,9 +215,9 @@ impl<'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx> {
     }
 }
 
-struct BinaryenFnCtxt<'v, 'tcx: 'v, 'module> {
-    tcx: &'v TyCtxt<'v, 'tcx, 'tcx>,
-    mir: &'v RefCell<Mir<'tcx>>,
+struct BinaryenFnCtxt<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module> {
+    tcx: TyCtxt<'v, 'gcx, 'tcx>,
+    mir: &'v RefCell<Mir<'gcx>>,
     did: DefId,
     sig: &'v FnSig<'tcx>,
     func: builder::Fn<'module>,
@@ -231,7 +231,7 @@ struct BinaryenFnCtxt<'v, 'tcx: 'v, 'module> {
     ret_var: Option<usize>,
 }
 
-impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
+impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 'module> {
     /// This is the main entry point for MIR->wasm fn translation
     fn trans(&'module mut self) {
 
@@ -380,7 +380,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 }
                 TerminatorKind::Switch { ref discr, .. } => {
                     let adt = self.trans_lval(discr).unwrap();
-                    let adt_ty = discr.ty(&*mir, *self.tcx).to_ty(*self.tcx);
+                    let adt_ty = discr.ty(&*mir, self.tcx).to_ty(self.tcx);
 
                     if adt.offset.is_some() {
                         panic!("unimplemented Switch with offset");
@@ -457,7 +457,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     binaryen_stmts.push(b_call);
                                 } else {
                                     let dest = self.trans_lval(lvalue).unwrap();
-                                    let dest_ty = lvalue.ty(&*mir, *self.tcx).to_ty(*self.tcx);
+                                    let dest_ty = lvalue.ty(&*mir, self.tcx).to_ty(self.tcx);
                                     let dest_layout = self.type_layout(dest_ty);
 
                                     match *dest_layout {
@@ -821,7 +821,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 return;
             }
         };
-        let dest_ty = lvalue.ty(&*mir, *self.tcx).to_ty(*self.tcx);
+        let dest_ty = lvalue.ty(&*mir, self.tcx).to_ty(self.tcx);
 
         let dest_layout = self.type_layout(dest_ty);
 
@@ -1220,7 +1220,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 match *kind {
                     CastKind::Misc => {
                         let src = self.trans_operand(operand);
-                        let src_ty = operand.ty(&*mir, *self.tcx);
+                        let src_ty = operand.ty(&*mir, self.tcx);
                         let src_layout = self.type_layout(src_ty);
 
                         // TODO: handle more of the casts (miri doesn't really handle every Misc
@@ -1357,7 +1357,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     Some(base) => base,
                     None => return None,
                 };
-                let base_ty = projection.base.ty(&*mir, *self.tcx).to_ty(*self.tcx);
+                let base_ty = projection.base.ty(&*mir, self.tcx).to_ty(self.tcx);
                 let base_layout = self.type_layout(base_ty);
 
                 match projection.elem {
@@ -1421,8 +1421,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                         return unsafe { BinaryenUnreachable(self.func.module.module) };
                     }
                 };
-                let lval_ty = lvalue.ty(&*mir, *self.tcx);
-                let t = lval_ty.to_ty(*self.tcx);
+                let lval_ty = lvalue.ty(&*mir, self.tcx);
+                let t = lval_ty.to_ty(self.tcx);
                 let t = rust_ty_to_binaryen(t);
 
                 unsafe {
@@ -1494,13 +1494,13 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     }
 
     #[inline]
-    fn type_layout(&self, ty: Ty<'tcx>) -> &'tcx Layout {
+    fn type_layout(&self, ty: Ty<'tcx>) -> &Layout {
         let substs = Substs::empty();
         self.type_layout_with_substs(ty, substs)
     }
 
     // Imported from miri and slightly modified to adapt to our monomorphize api
-    fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &'tcx Substs<'tcx>) -> &'tcx Layout {
+    fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &Substs<'tcx>) -> &Layout {
         // TODO(solson): Is this inefficient? Needs investigation.
         let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
 
@@ -1513,10 +1513,10 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     fn trans_fn_name_direct(&mut self,
                             operand: &Operand<'tcx>)
                             -> Option<(*const c_char, BinaryenType, BinaryenCallKind, bool)> {
-        match *operand {
-            Operand::Constant(ref c) => {
+        match operand {
+            &Operand::Constant(c) => {
                 match c.literal {
-                    Literal::Item { def_id, ref substs } => {
+                    Literal::Item { def_id, substs } => {
                         let ty = self.tcx.item_type(def_id);
                         if ty.is_fn() {
                             assert!(def_id.is_local());
@@ -1539,7 +1539,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
 
                                     let (substs, sig) = if !is_trait_method {
-                                        (*substs, sig)
+                                        (substs, sig)
                                     } else {
                                         let (resolved_def_id, resolved_substs) =
                                             traits::resolve_trait_method(self.tcx, fn_did, substs);
