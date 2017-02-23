@@ -43,10 +43,10 @@ impl<'a> CompilerCalls<'a> for WasmCompilerCalls {
             } else {
                 None
             };
-            trans::trans_crate(&state.tcx.unwrap(),
-                               entry_fn,
-                               &options)
-                .expect("error translating crate");
+            match state.tcx {
+                Some(tcx) => trans::trans_crate(tcx, entry_fn, &options).expect("error translating crate"),
+                None => panic!()
+            }
         });
 
         control

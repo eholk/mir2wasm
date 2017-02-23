@@ -1,19 +1,8 @@
 use libc::c_char;
 use error::*;
 use rustc::mir::{Mir, Local};
-use rustc::mir::{
-    UnOp,
-    BinOp,
-    Literal,
-    Lvalue,
-    Operand,
-    ProjectionElem,
-    Rvalue,
-    AggregateKind,
-    CastKind,
-    StatementKind,
-    TerminatorKind,
-};
+use rustc::mir::{UnOp, BinOp, Literal, Lvalue, Operand, ProjectionElem, Rvalue, AggregateKind,
+                 CastKind, StatementKind, TerminatorKind};
 use rustc::dep_graph::DepNode;
 use rustc::middle::const_val::ConstVal;
 use rustc_const_math::{ConstInt, ConstIsize};
@@ -21,17 +10,13 @@ use rustc::ty::{self, TyCtxt, Ty, FnSig};
 use rustc::ty::layout::{self, Layout, Size};
 use rustc::ty::subst::Substs;
 use rustc::hir::intravisit::{self, Visitor, FnKind, NestedVisitorMap};
+use rustc::hir::itemlikevisit::DeepVisitor;
 use rustc::hir::{FnDecl, BodyId};
 use rustc::hir::def_id::DefId;
 use rustc::traits::Reveal;
 use syntax::ast::{NodeId, IntTy, UintTy, FloatTy};
 use syntax::codemap::Span;
 use std::ffi::CString;
-use std::fs::File;
-use std::io;
-use std::io::Write;
-use std::mem;
-use std::path::Path;
 use std::ptr;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -62,7 +47,7 @@ impl WasmTransOptions {
     }
 }
 
-pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'a, 'tcx>,
+pub fn trans_crate<'a, 'tcx: 'a>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                              entry_fn: Option<NodeId>,
                              options: &WasmTransOptions)
                              -> Result<()> {
@@ -73,21 +58,13 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'a, 'tcx>,
         unsafe { BinaryenSetAPITracing(true) }
     }
 
-    let mut v = BinaryenModuleCtxt {
-        tcx: tcx,
-        module: builder::Module::new(),
-        entry_fn: entry_fn,
-        fun_types: HashMap::new(),
-        fun_names: HashMap::new(),
-        c_strings: Vec::new(),
-    };
-
-    v.module.auto_drop();
+    let mut module = builder::Module::new();
+    module.auto_drop();
 
     // TODO: allow for a configurable (or auto-detected) memory size
     let mem_size = BinaryenIndex(256);
     unsafe {
-        BinaryenSetMemory(v.module.module,
+        BinaryenSetMemory(module.module,
                           mem_size,
                           mem_size,
                           CString::new("memory").unwrap().as_ptr(),
@@ -97,18 +74,20 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'a, 'tcx>,
                           BinaryenIndex(0));
     }
 
+    {
+
     // TODO determine correct crate-visiting semantics
     //tcx.map.krate().visit_all_items(v);
-    tcx.visit_all_item_likes_in_krate(DepNode::Mir, &mut v.as_deep_visitor());
+    tcx.visit_all_item_likes_in_krate(DepNode::Mir, &mut BinaryenModuleCtxt::new(tcx, &mut module, entry_fn).as_deep_visitor());
     //intravisit::walk_crate(v, tcx.map.krate());
-
-    assert!(v.module.is_valid(),
+}
+    assert!(module.is_valid(),
             "Internal compiler error: invalid generated module");
 
     // TODO: check which of the Binaryen optimization passes we want aren't on by default here.
     //       eg, removing unused functions and imports, minification, etc
     if options.optimize {
-        v.module.optimize();
+        module.optimize();
     }
 
     unsafe {
@@ -117,53 +96,41 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'a, 'tcx>,
         }
 
         if options.print && !options.interpret {
-            BinaryenModulePrint(v.module.module);
+            BinaryenModulePrint(module.module);
         }
 
         if options.interpret {
-            BinaryenModuleInterpret(v.module.module);
+            BinaryenModuleInterpret(module.module);
         }
     }
 
     for output in &options.binary_output_path {
-        v.write_to_file(output).expect("error writing wasm file");
+        module.write_to_file(output).expect("error writing wasm file");
     }
 
     Ok(())
 }
 
-struct BinaryenModuleCtxt<'v, 'gcx: 'tcx + 'v, 'tcx: 'v> {
-    tcx: TyCtxt<'v, 'gcx, 'tcx>,
-    module: builder::Module,
+struct BinaryenModuleCtxt<'v, 'tcx: 'v, 'module> {
+    tcx: TyCtxt<'v, 'tcx, 'tcx>,
+    module: &'module mut builder::Module,
     entry_fn: Option<NodeId>,
     fun_types: HashMap<ty::FnSig<'tcx>, BinaryenFunctionTypeRef>,
     fun_names: HashMap<(DefId, ty::FnSig<'tcx>), CString>,
     c_strings: Vec<CString>,
 }
 
-impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v> BinaryenModuleCtxt<'v, 'gcx, 'tcx> {
-    fn serialize(&self) -> Vec<u8> {
-        unsafe {
-            // TODO: find a way to determine the size of the buffer
-            // first. Right now we just make a 4MB buffer and
-            // truncate.
-            let mut buffer = Vec::with_capacity(1 << 22);
-            let size = BinaryenModuleWrite(self.module.module,
-                                           mem::transmute(buffer.as_mut_ptr()),
-                                           buffer.capacity());
-
-            buffer.set_len(size);
-            buffer.shrink_to_fit();
-
-            buffer
+impl<'v, 'tcx: 'v, 'module> BinaryenModuleCtxt<'v, 'tcx, 'module> {
+    fn new(tcx: TyCtxt<'v, 'tcx, 'tcx>, module: &'module mut builder::Module, entry_fn: Option<NodeId>)
+     -> BinaryenModuleCtxt<'v, 'tcx, 'module> {
+        BinaryenModuleCtxt {
+            tcx: tcx,
+            module: module,
+            entry_fn: entry_fn,
+            fun_types: HashMap::new(),
+            fun_names: HashMap::new(),
+            c_strings: Vec::new(),
         }
-    }
-
-    fn write_to_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        let mut file = try!(File::create(path));
-        let buffer = self.serialize();
-
-        file.write_all(buffer.as_slice())
     }
 }
 
@@ -171,7 +138,7 @@ impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v> BinaryenModuleCtxt<'v, 'gcx, 'tcx> {
 // TODO: investigate where should the preferred location be
 const STACK_POINTER_ADDRESS: i32 = 0;
 
-impl<'v, 'gcx: 'tcx + 'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'gcx, 'tcx> {
+impl<'v, 'tcx, 'module> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx, 'module> {
     fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
         NestedVisitorMap::None
     }
@@ -215,9 +182,9 @@ impl<'v, 'gcx: 'tcx + 'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'gcx, 'tc
     }
 }
 
-struct BinaryenFnCtxt<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module> {
-    tcx: TyCtxt<'v, 'gcx, 'tcx>,
-    mir: &'v RefCell<Mir<'gcx>>,
+struct BinaryenFnCtxt<'v, 'tcx: 'v, 'module> {
+    tcx: TyCtxt<'v, 'tcx, 'tcx>,
+    mir: &'v RefCell<Mir<'tcx>>,
     did: DefId,
     sig: &'v FnSig<'tcx>,
     func: builder::Fn<'module>,
@@ -231,7 +198,7 @@ struct BinaryenFnCtxt<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module> {
     ret_var: Option<usize>,
 }
 
-impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 'module> {
+impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     /// This is the main entry point for MIR->wasm fn translation
     fn trans(&'module mut self) {
 
@@ -324,8 +291,7 @@ impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 
 
         let mut relooper_blocks = Vec::new();
 
-        debug!("{} MIR basic blocks to translate",
-               mir.basic_blocks().len());
+        debug!("{} MIR basic blocks to translate", mir.basic_blocks().len());
 
         for (i, bb) in mir.basic_blocks().iter().enumerate() {
             debug!("bb{}: {:#?}", i, bb);
@@ -665,9 +631,10 @@ impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 
                         // valid u32 ? (doubtful)
                         let labels = variants.iter()
                             .map(|&v| {
-                                let discr_val =
-                                    adt_def.variants[v].disr_val.to_u32()
-                                        .expect("unimplemented: enum discriminant size > u32 ");
+                                let discr_val = adt_def.variants[v]
+                                    .disr_val
+                                    .to_u32()
+                                    .expect("unimplemented: enum discriminant size > u32 ");
                                 BinaryenIndex(discr_val)
                             })
                             .collect::<Vec<_>>();
@@ -1191,10 +1158,9 @@ impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 
                                     let allocation = self.emit_alloca(dest.index, dest_size);
                                     statements.push(allocation);
 
-                                    let offsets = ::std::iter::once(0)
-                                        .chain(variant.offsets
-                                            .iter()
-                                            .map(|s| s.bytes()));
+                                    let offsets = ::std::iter::once(0).chain(variant.offsets
+                                        .iter()
+                                        .map(|s| s.bytes()));
                                     debug!("emitting Stores for tuple fields, values: {:?}",
                                            operands);
                                     self.emit_assign_fields(offsets, operands, statements);
@@ -1494,27 +1460,95 @@ impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 
     }
 
     #[inline]
-    fn type_layout(&self, ty: Ty<'tcx>) -> &Layout {
+    fn type_layout(&self, ty: Ty<'tcx>) -> &'tcx Layout {
         let substs = Substs::empty();
         self.type_layout_with_substs(ty, substs)
     }
 
     // Imported from miri and slightly modified to adapt to our monomorphize api
-    fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &Substs<'tcx>) -> &Layout {
-        // TODO(solson): Is this inefficient? Needs investigation.
-        let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
+    fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &Substs<'tcx>) -> &'tcx Layout {
+        unimplemented!();
+        // // TODO(solson): Is this inefficient? Needs investigation.
+        // let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
+        //
+        // self.tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
+        //     // TODO(solson): Report this error properly.
+        //     ty.layout(&infcx).unwrap()
+        // })
+    }
 
-        self.tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
-            // TODO(solson): Report this error properly.
-            ty.layout(&infcx).unwrap()
-        })
+    fn trans_fn(&mut self,
+                fn_did: DefId,
+                substs: &'tcx Substs<'tcx>,
+                sig: &FnSig<'tcx>)
+                -> (FnSig<'tcx>, DefId) {
+        let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
+
+        let (substs, sig): (&'tcx Substs<'tcx>, &FnSig<'tcx>) = if !is_trait_method {
+            (substs, sig)
+        } else {
+            let (resolved_def_id, resolved_substs): (_, &'tcx Substs<'tcx>) =
+                panic!();//traits::resolve_trait_method(self.tcx, fn_did, substs);
+            let ty = self.tcx.item_type(resolved_def_id);
+            // TODO: investigate rustc trans use of
+            // liberate_bound_regions or similar here
+            let sig = ty.fn_sig().skip_binder();
+
+            fn_did = resolved_def_id;
+            (resolved_substs, sig)
+        };
+
+        let mir = {
+            self.tcx.mir_map.borrow()[&fn_did]
+        };
+
+        let fn_sig: FnSig<'tcx> = monomorphize::apply_param_substs(self.tcx, substs, &sig);
+
+        // mark the fn defid seen to not have translated twice
+        // TODO: verify this more thoroughly, works for our limited
+        // tests right now
+        if sig != &fn_sig {
+            let fn_name = sanitize_symbol(&self.tcx
+                .item_path_str(fn_did));
+            let fn_name = CString::new(fn_name).expect("");
+            self.fun_names.insert((fn_did, sig.clone()), fn_name);
+        }
+
+        // This simple check is also done in trans() but doing it here
+        // helps have a clearer debug log
+        if !self.fun_names.contains_key(&(fn_did, fn_sig.clone())) {
+            let mut ctxt = BinaryenFnCtxt {
+                tcx: self.tcx,
+                mir: mir,
+                did: fn_did,
+                sig: &fn_sig,
+                func: self.func.module.create_func(),
+                entry_fn: self.entry_fn,
+                fun_types: &mut self.fun_types,
+                fun_names: &mut self.fun_names,
+                c_strings: &mut self.c_strings,
+                checked_op_local: None,
+                var_map: Vec::new(),
+                temp_map: Vec::new(),
+                ret_var: None,
+            };
+
+            debug!("translating monomorphized fn {:?}",
+                   self.tcx.item_path_str(fn_did));
+            ctxt.trans();
+            debug!("done translating monomorphized {:?}, continuing translation of fn {:?}",
+                   self.tcx.item_path_str(fn_did),
+                   self.tcx.item_path_str(self.did));
+        }
+
+        return (fn_sig, fn_did);
     }
 
     fn trans_fn_name_direct(&mut self,
                             operand: &Operand<'tcx>)
                             -> Option<(*const c_char, BinaryenType, BinaryenCallKind, bool)> {
         match operand {
-            &Operand::Constant(c) => {
+            &Operand::Constant(ref c) => {
                 match c.literal {
                     Literal::Item { def_id, substs } => {
                         let ty = self.tcx.item_type(def_id);
@@ -1536,66 +1570,9 @@ impl<'v, 'gcx: 'tcx + 'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'gcx, 'tcx, 
                                     self.import_wasm_extern(fn_did, sig);
                                 }
                                 _ => {
-                                    let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
-
-                                    let (substs, sig) = if !is_trait_method {
-                                        (substs, sig)
-                                    } else {
-                                        let (resolved_def_id, resolved_substs) =
-                                            traits::resolve_trait_method(self.tcx, fn_did, substs);
-                                        let ty = self.tcx.item_type(resolved_def_id);
-                                        // TODO: investigate rustc trans use of
-                                        // liberate_bound_regions or similar here
-                                        let sig = ty.fn_sig().skip_binder();
-
-                                        fn_did = resolved_def_id;
-                                        (resolved_substs, sig)
-                                    };
-
-                                    let mir = {
-                                        self.tcx.mir_map.borrow()[&fn_did]
-                                    };
-
-                                    fn_sig =
-                                        monomorphize::apply_param_substs(self.tcx, substs, sig);
-
-                                    // mark the fn defid seen to not have translated twice
-                                    // TODO: verify this more thoroughly, works for our limited
-                                    // tests right now
-                                    if *sig != fn_sig {
-                                        let fn_name = sanitize_symbol(&self.tcx
-                                            .item_path_str(fn_did));
-                                        let fn_name = CString::new(fn_name).expect("");
-                                        self.fun_names.insert((fn_did, sig.clone()), fn_name);
-                                    }
-
-                                    // This simple check is also done in trans() but doing it here
-                                    // helps have a clearer debug log
-                                    if !self.fun_names.contains_key(&(fn_did, fn_sig.clone())) {
-                                        let mut ctxt = BinaryenFnCtxt {
-                                            tcx: self.tcx,
-                                            mir: mir,
-                                            did: fn_did,
-                                            sig: &fn_sig,
-                                            func: self.func.module.create_func(),
-                                            entry_fn: self.entry_fn,
-                                            fun_types: &mut self.fun_types,
-                                            fun_names: &mut self.fun_names,
-                                            c_strings: &mut self.c_strings,
-                                            checked_op_local: None,
-                                            var_map: Vec::new(),
-                                            temp_map: Vec::new(),
-                                            ret_var: None,
-                                        };
-
-                                        debug!("translating monomorphized fn {:?}",
-                                               self.tcx.item_path_str(fn_did));
-                                        ctxt.trans();
-                                        debug!("done translating monomorphized {:?}, continuing \
-                                                translation of fn {:?}",
-                                               self.tcx.item_path_str(fn_did),
-                                               self.tcx.item_path_str(self.did));
-                                    }
+                                    let (fn_sig_, fn_did_) = self.trans_fn(fn_did, substs, sig);
+                                    fn_sig = fn_sig_;
+                                    fn_did = fn_did_;
                                 }
                             }
 
@@ -1772,11 +1749,9 @@ fn rust_ty_to_builder<'tcx>(t: Ty<'tcx>) -> builder::Type {
 
 fn sanitize_symbol(s: &str) -> String {
     s.chars()
-        .map(|c| {
-            match c {
-                '<' | '>' | ' ' | '(' | ')' => '_',
-                _ => c,
-            }
+        .map(|c| match c {
+            '<' | '>' | ' ' | '(' | ')' => '_',
+            _ => c,
         })
         .collect()
 }
@@ -1839,7 +1814,7 @@ impl IntegerExt for layout::Integer {
             I16 => Size::from_bits(16),
             I32 => Size::from_bits(32),
             I64 => Size::from_bits(64),
-            I128 => panic!("i128 is not yet supported")
+            I128 => panic!("i128 is not yet supported"),
         }
     }
 }

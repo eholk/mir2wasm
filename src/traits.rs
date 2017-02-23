@@ -13,7 +13,7 @@ use syntax::codemap::DUMMY_SP;
 /// Trait method, which has to be resolved to an impl method.
 pub fn resolve_trait_method<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                       def_id: DefId,
-                                      substs: &'tcx Substs<'tcx>)
+                                      substs: &Substs<'tcx>)
                                       -> (DefId, &'tcx Substs<'tcx>) {
     let method_item = tcx.associated_item(def_id);
     let trait_id = method_item.container.id();
