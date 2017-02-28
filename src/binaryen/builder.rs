@@ -64,9 +64,8 @@ impl Module {
 
     pub fn serialize(&self) -> Vec<u8> {
         unsafe {
-            // TODO: find a way to determine the size of the buffer
-            // first. Right now we just make a 4MB buffer and
-            // truncate.
+            // TODO: find a way to determine the size of the buffer first. Right now we just make a
+            // 4MB buffer and truncate.
             let mut buffer = Vec::with_capacity(1 << 22);
             let size = sys::BinaryenModuleWrite(self.module,
                                                 mem::transmute(buffer.as_mut_ptr()),
@@ -223,7 +222,7 @@ impl<'module> Fn<'module> {
 }
 
 pub struct Var {
-    // TODO: this would be nice to have, but it causes issues.
+    // TODO: this func field would be nice to have, but it causes issues.
     // func: &'func Fn<'func>,
     ty: ReprType,
     index: usize,

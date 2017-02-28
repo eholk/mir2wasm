@@ -43,7 +43,10 @@ impl<'a> CompilerCalls<'a> for WasmCompilerCalls {
             } else {
                 None
             };
-            trans::trans_crate(state.tcx.expect("type context needed").global_tcx(), entry_fn, &options).expect("error translating crate")
+            trans::trans_crate(state.tcx.expect("type context needed").global_tcx(),
+                               entry_fn,
+                               &options)
+                .expect("error translating crate")
         });
 
         control

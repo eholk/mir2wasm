@@ -271,7 +271,9 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         // Create the wasm vars.
         // Params and vars form the list of locals, both sharing the same index space.
         for mir_var in mir.vars_iter() {
-            debug!("adding local {:?}: {:?}", mir_var, mir.local_decls[mir_var].ty);
+            debug!("adding local {:?}: {:?}",
+                   mir_var,
+                   mir.local_decls[mir_var].ty);
             match rust_ty_to_builder(mir.local_decls[mir_var].ty) {
                 Some(ty) => {
                     let var = self.func.create_local(ty).index();
@@ -414,7 +416,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 //                                  BinaryenInt32())
                 //             }
                 //         }
-                //         _ => panic!("unimplemented discrimant value for Layout {:?}", adt_layout),
+                //         _ => panic!("unimplemented discrimant value for Layout {:?}",
+                //                     adt_layout),
                 //     };
                 //
                 //     block_kind = BinaryenBlockKind::Switch(discr_val);
@@ -674,12 +677,12 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 //             })
                 //             .collect::<Vec<_>>();
                 //
-                //         // wasm also requires to have a "default" branch, even though this is less
-                //         // useful to us as we have a target for every variant.
-                //         // TODO: figure out the best way to handle this, maybe add an unreachable
-                //         // block to trigger an error. In the meantime, consider the edge to the
-                //         // first variant as the default branch. And apparently the LLVM backend
-                //         // emits a random branch as the default one.
+                //         // wasm also requires to have a "default" branch, even though this is
+                //         // less useful to us as we have a target for every variant.
+                //         // TODO: figure out the best way to handle this, maybe add an
+                //         // unreachable block to trigger an error. In the meantime, consider the
+                //         // edge to the first variant as the default branch. And apparently the
+                //         // LLVM backend emits a random branch as the default one.
                 //         let (labels_ptr, labels_count) = if variants.contains(&0) {
                 //             (ptr::null(), 0)
                 //         } else {
@@ -1493,7 +1496,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         let (substs, sig) = if !is_trait_method {
             (substs, &sig)
         } else {
-            let (resolved_def_id, resolved_substs) = traits::resolve_trait_method(self.tcx, fn_did, substs);
+            let (resolved_def_id, resolved_substs) =
+                traits::resolve_trait_method(self.tcx, fn_did, substs);
             let ty = self.tcx.item_type(resolved_def_id);
             // TODO: investigate rustc trans use of
             // liberate_bound_regions or similar here
@@ -1575,7 +1579,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                     self.import_wasm_extern(fn_did, sig);
                                 }
                                 _ => {
-                                    let (fn_sig_, fn_did_) = self.trans_fn(fn_did, substs, sig.clone());
+                                    let (fn_sig_, fn_did_) =
+                                        self.trans_fn(fn_did, substs, sig.clone());
                                     fn_sig = fn_sig_;
                                     fn_did = fn_did_;
                                 }
