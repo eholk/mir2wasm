@@ -213,26 +213,26 @@ impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 
 
     fn get_local_index(&self, i: usize) -> Option<usize> {
         debug!("fetching local {:?}", i);
-        debug!("vars: {:?}", self.var_map);
-        debug!("temps: {:?}", self.temp_map);
+        debug!("  vars: {:?}", self.var_map);
+        debug!("  temps: {:?}", self.temp_map);
+        if i == 0 {
+            debug!("returning retvar");
+            return self.ret_var;
+        }
+        let i = i - 1;
         if i < self.num_args() {
             debug!("returning function arg {}", i);
             return Some(i);
         }
         let i = i - self.num_args();
         if i < self.var_map.len() {
-            debug!("returning {}th local", i);
+            debug!("returning {}th local: {:?}", i, self.var_map[i]);
             return self.var_map[i];
         }
         let i = i - self.var_map.len();
-        if i < self.temp_map.len() {
-        debug!("returning {}th temp", i);
+        assert!(i < self.temp_map.len());
+        debug!("returning {}th temp: {:?}", i, self.temp_map[i]);
         return self.temp_map[i];
-    }
-        let i = i - self.temp_map.len();
-        assert!(i == 0);
-        debug!("index 0 means retvar");
-        return self.ret_var;
     }
 }
 
@@ -273,7 +273,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         // Create the wasm vars.
         // Params and vars form the list of locals, both sharing the same index space.
         for mir_var in mir.vars_iter() {
-            debug!("adding local {:?}", mir_var);
+            debug!("adding local {:?}: {:?}", mir_var, mir.local_decls[mir_var].ty);
             match rust_ty_to_builder(mir.local_decls[mir_var].ty) {
                 Some(ty) => {
                     let var = self.func.create_local(ty).index();
@@ -284,10 +284,10 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         }
 
         for mir_var in mir.temps_iter() {
-            debug!("adding {:?}", mir_var);
+            debug!("adding temp {:?}", mir_var);
             let ty = rust_ty_to_builder(mir.local_decls[mir_var].ty)
                 .map(|ty| self.func.create_local(ty).index());
-            debug!("type is {:?}", &ty);
+            debug!("  type is {:?} ~> {:?}", mir.local_decls[mir_var].ty, &ty);
             self.temp_map.push(ty);
         }
 
@@ -573,6 +573,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                 debug!("emitting Call to fn {:?}", func);
                                 binaryen_stmts.push(b_call);
                                 if is_never {
+                                    debug!("{:?} is !, adding unreachable", func);
                                     let unreachable = BinaryenUnreachable(self.func.module.module);
                                     binaryen_stmts.push(unreachable);
                                 }
