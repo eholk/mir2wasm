@@ -1511,7 +1511,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
             self.tcx.mir_map.borrow()[&fn_did]
         };
 
-        let fn_sig = sig.clone(); //sig.subst(self.tcx, substs);//monomorphize::apply_substs(self.tcx, substs, &sig);
+        let fn_sig = monomorphize::apply_substs(self.tcx, substs, &sig);
 
         // mark the fn defid seen to not have translated twice
         // TODO: verify this more thoroughly, works for our limited
@@ -1726,7 +1726,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
     // Imported from miri and slightly modified to adapt to our monomorphize api
     fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &Substs<'tcx>) -> &'tcx Layout {
         // TODO(solson): Is this inefficient? Needs investigation.
-        //let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
+        let ty = monomorphize::apply_substs(self.tcx, substs, &ty);
 
         self.tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
             // TODO(solson): Report this error properly.
