@@ -69,8 +69,8 @@ impl Module {
             // truncate.
             let mut buffer = Vec::with_capacity(1 << 22);
             let size = sys::BinaryenModuleWrite(self.module,
-                                           mem::transmute(buffer.as_mut_ptr()),
-                                           buffer.capacity());
+                                                mem::transmute(buffer.as_mut_ptr()),
+                                                buffer.capacity());
 
             buffer.set_len(size);
             buffer.shrink_to_fit();

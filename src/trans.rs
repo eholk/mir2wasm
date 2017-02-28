@@ -14,6 +14,7 @@ use rustc::hir::itemlikevisit::DeepVisitor;
 use rustc::hir::{FnDecl, BodyId};
 use rustc::hir::def_id::DefId;
 use rustc::traits::Reveal;
+use rustc::ty::subst::Subst;
 use syntax::ast::{NodeId, IntTy, UintTy, FloatTy};
 use syntax::codemap::Span;
 use std::ffi::CString;
@@ -47,7 +48,19 @@ impl WasmTransOptions {
     }
 }
 
-pub fn trans_crate<'a, 'tcx: 'a>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
+fn visit_krate<'g, 'gcx, 'tcx>(tcx: TyCtxt<'g, 'gcx, 'tcx>,
+                         module: builder::Module,
+                         entry_fn: Option<NodeId>)
+                         -> builder::Module {
+    // TODO determine correct crate-visiting semantics
+    //tcx.map.krate().visit_all_items(v);
+    let mut context: BinaryenModuleCtxt<'g, 'gcx, 'tcx> = BinaryenModuleCtxt::new(tcx, module, entry_fn);
+    tcx.visit_all_item_likes_in_krate(DepNode::Mir, &mut context.as_deep_visitor());
+    //intravisit::walk_crate(v, tcx.map.krate());
+    context.module
+}
+
+pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                              entry_fn: Option<NodeId>,
                              options: &WasmTransOptions)
                              -> Result<()> {
@@ -74,13 +87,7 @@ pub fn trans_crate<'a, 'tcx: 'a>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                           BinaryenIndex(0));
     }
 
-    {
-
-    // TODO determine correct crate-visiting semantics
-    //tcx.map.krate().visit_all_items(v);
-    tcx.visit_all_item_likes_in_krate(DepNode::Mir, &mut BinaryenModuleCtxt::new(tcx, &mut module, entry_fn).as_deep_visitor());
-    //intravisit::walk_crate(v, tcx.map.krate());
-}
+    let mut module = visit_krate(tcx, module, entry_fn);
     assert!(module.is_valid(),
             "Internal compiler error: invalid generated module");
 
@@ -111,18 +118,20 @@ pub fn trans_crate<'a, 'tcx: 'a>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     Ok(())
 }
 
-struct BinaryenModuleCtxt<'v, 'tcx: 'v, 'module> {
-    tcx: TyCtxt<'v, 'tcx, 'tcx>,
-    module: &'module mut builder::Module,
+struct BinaryenModuleCtxt<'b, 'gcx: 'b + 'tcx, 'tcx: 'b> {
+    tcx: TyCtxt<'b, 'gcx, 'tcx>,
+    module: builder::Module,
     entry_fn: Option<NodeId>,
-    fun_types: HashMap<ty::FnSig<'tcx>, BinaryenFunctionTypeRef>,
-    fun_names: HashMap<(DefId, ty::FnSig<'tcx>), CString>,
+    fun_types: HashMap<ty::FnSig<'gcx>, BinaryenFunctionTypeRef>,
+    fun_names: HashMap<(DefId, ty::FnSig<'gcx>), CString>,
     c_strings: Vec<CString>,
 }
 
-impl<'v, 'tcx: 'v, 'module> BinaryenModuleCtxt<'v, 'tcx, 'module> {
-    fn new(tcx: TyCtxt<'v, 'tcx, 'tcx>, module: &'module mut builder::Module, entry_fn: Option<NodeId>)
-     -> BinaryenModuleCtxt<'v, 'tcx, 'module> {
+impl<'c, 'gcx: 'c + 'tcx, 'tcx: 'c> BinaryenModuleCtxt<'c, 'gcx, 'tcx> {
+    fn new(tcx: TyCtxt<'c, 'gcx, 'tcx>,
+           module: builder::Module,
+           entry_fn: Option<NodeId>)
+           -> BinaryenModuleCtxt<'c, 'gcx, 'tcx> {
         BinaryenModuleCtxt {
             tcx: tcx,
             module: module,
@@ -138,13 +147,13 @@ impl<'v, 'tcx: 'v, 'module> BinaryenModuleCtxt<'v, 'tcx, 'module> {
 // TODO: investigate where should the preferred location be
 const STACK_POINTER_ADDRESS: i32 = 0;
 
-impl<'v, 'tcx, 'module> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx, 'module> {
-    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'v> {
+impl<'e, 'gcx, 'tcx: 'e, 'h> Visitor<'h> for BinaryenModuleCtxt<'e, 'gcx, 'tcx> {
+    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'h> {
         NestedVisitorMap::None
     }
 
-    fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v FnDecl, b: BodyId, s: Span, id: NodeId) {
-        let did = self.tcx.map.local_def_id(id);
+    fn visit_fn(&mut self, fk: FnKind<'h>, fd: &'h FnDecl, b: BodyId, s: Span, id: NodeId) {
+        let did = self.tcx.hir.local_def_id(id);
 
         let generics = self.tcx.item_generics(did);
 
@@ -182,23 +191,23 @@ impl<'v, 'tcx, 'module> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx, 'module> {
     }
 }
 
-struct BinaryenFnCtxt<'v, 'tcx: 'v, 'module> {
-    tcx: TyCtxt<'v, 'tcx, 'tcx>,
-    mir: &'v RefCell<Mir<'tcx>>,
+struct BinaryenFnCtxt<'d, 'gcx: 'd + 'tcx, 'tcx: 'd, 'module> {
+    tcx: TyCtxt<'d, 'gcx, 'tcx>,
+    mir: &'d RefCell<Mir<'gcx>>,
     did: DefId,
-    sig: &'v FnSig<'tcx>,
+    sig: &'d FnSig<'gcx>,
     func: builder::Fn<'module>,
     entry_fn: Option<NodeId>,
-    fun_types: &'v mut HashMap<ty::FnSig<'tcx>, BinaryenFunctionTypeRef>,
-    fun_names: &'v mut HashMap<(DefId, ty::FnSig<'tcx>), CString>,
-    c_strings: &'v mut Vec<CString>,
+    fun_types: &'d mut HashMap<ty::FnSig<'gcx>, BinaryenFunctionTypeRef>,
+    fun_names: &'d mut HashMap<(DefId, ty::FnSig<'gcx>), CString>,
+    c_strings: &'d mut Vec<CString>,
     checked_op_local: Option<BinaryenIndex>,
     var_map: Vec<Option<usize>>,
     temp_map: Vec<Option<usize>>,
     ret_var: Option<usize>,
 }
 
-impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
+impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 'module> {
     /// This is the main entry point for MIR->wasm fn translation
     fn trans(&'module mut self) {
 
@@ -344,47 +353,47 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     let expr = unsafe { BinaryenReturn(self.func.module.module, expr) };
                     binaryen_stmts.push(expr);
                 }
-                TerminatorKind::Switch { ref discr, .. } => {
-                    let adt = self.trans_lval(discr).unwrap();
-                    let adt_ty = discr.ty(&*mir, self.tcx).to_ty(self.tcx);
-
-                    if adt.offset.is_some() {
-                        panic!("unimplemented Switch with offset");
-                    }
-
-                    let adt_layout = self.type_layout(adt_ty);
-                    let discr_val = match *adt_layout {
-                        Layout::General { discr, .. } => {
-                            let discr_size = discr.size().bytes() as u32;
-                            debug!("emitting GetLocal({}) + Load for ADT Switch condition",
-                                   adt.index.0);
-                            unsafe {
-                                let ptr = BinaryenGetLocal(self.func.module.module,
-                                                           adt.index,
-                                                           BinaryenInt32());
-                                BinaryenLoad(self.func.module.module,
-                                             discr_size,
-                                             0,
-                                             0,
-                                             0,
-                                             BinaryenInt32(),
-                                             ptr)
-                            }
-                        }
-                        Layout::CEnum { .. } => {
-                            debug!("emitting GetLocal({}) for CEnum Switch condition",
-                                   adt.index.0);
-                            unsafe {
-                                BinaryenGetLocal(self.func.module.module,
-                                                 adt.index,
-                                                 BinaryenInt32())
-                            }
-                        }
-                        _ => panic!("unimplemented discrimant value for Layout {:?}", adt_layout),
-                    };
-
-                    block_kind = BinaryenBlockKind::Switch(discr_val);
-                }
+                // TerminatorKind::Switch { ref discr, .. } => {
+                //     let adt = self.trans_lval(discr).unwrap();
+                //     let adt_ty = discr.ty(&*mir, self.tcx).to_ty(self.tcx);
+                //
+                //     if adt.offset.is_some() {
+                //         panic!("unimplemented Switch with offset");
+                //     }
+                //
+                //     let adt_layout = self.type_layout(adt_ty);
+                //     let discr_val = match *adt_layout {
+                //         Layout::General { discr, .. } => {
+                //             let discr_size = discr.size().bytes() as u32;
+                //             debug!("emitting GetLocal({}) + Load for ADT Switch condition",
+                //                    adt.index.0);
+                //             unsafe {
+                //                 let ptr = BinaryenGetLocal(self.func.module.module,
+                //                                            adt.index,
+                //                                            BinaryenInt32());
+                //                 BinaryenLoad(self.func.module.module,
+                //                              discr_size,
+                //                              0,
+                //                              0,
+                //                              0,
+                //                              BinaryenInt32(),
+                //                              ptr)
+                //             }
+                //         }
+                //         Layout::CEnum { .. } => {
+                //             debug!("emitting GetLocal({}) for CEnum Switch condition",
+                //                    adt.index.0);
+                //             unsafe {
+                //                 BinaryenGetLocal(self.func.module.module,
+                //                                  adt.index,
+                //                                  BinaryenInt32())
+                //             }
+                //         }
+                //         _ => panic!("unimplemented discrimant value for Layout {:?}", adt_layout),
+                //     };
+                //
+                //     block_kind = BinaryenBlockKind::Switch(discr_val);
+                // }
                 TerminatorKind::Call { ref func, ref args, ref destination, .. } => unsafe {
                     // NOTE: plan for the calling convention: i32/i64 f32/f64 are to be passed
                     // using the wasm stack and function parameters. For the other types, the
@@ -583,83 +592,83 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                           BinaryenExpressionRef(ptr::null_mut()));
                     }
                 }
-                TerminatorKind::If { ref cond, ref targets } => {
-                    debug!("emitting Branches for If, from bb{} to bb{} and bb{}",
-                           i,
-                           targets.0.index(),
-                           targets.1.index());
-
-                    let cond = self.trans_operand(cond);
-
-                    unsafe {
-                        RelooperAddBranch(relooper_blocks[i],
-                                          relooper_blocks[targets.0.index()],
-                                          cond,
-                                          BinaryenExpressionRef(ptr::null_mut()));
-                        RelooperAddBranch(relooper_blocks[i],
-                                          relooper_blocks[targets.1.index()],
-                                          BinaryenExpressionRef(ptr::null_mut()),
-                                          BinaryenExpressionRef(ptr::null_mut()));
-                    }
-                }
-                TerminatorKind::Switch { ref adt_def, ref targets, .. } => {
-                    // We're required to have only unique (from, to) edges, while we have
-                    // a variant to target mapping, where multiple variants can branch to
-                    // the same target block. So group them by target block index.
-                    let target_per_variant = targets.iter().map(|&t| t.index());
-                    let mut variants_per_target = HashMap::new();
-                    for (variant, target) in target_per_variant.enumerate() {
-                        match variants_per_target.entry(target) {
-                            Entry::Vacant(entry) => {
-                                entry.insert(vec![variant]);
-                            }
-                            Entry::Occupied(mut entry) => {
-                                entry.get_mut().push(variant);
-                            }
-                        }
-                    }
-
-                    for (target, variants) in variants_per_target {
-                        debug!("emitting Switch branch from bb{} to bb{}, for Enum '{:?}' \
-                                variants {:?}",
-                               i,
-                               target,
-                               adt_def,
-                               variants);
-
-                        // TODO: is it necessary to handle cases where the discriminant is not a
-                        // valid u32 ? (doubtful)
-                        let labels = variants.iter()
-                            .map(|&v| {
-                                let discr_val = adt_def.variants[v]
-                                    .disr_val
-                                    .to_u32()
-                                    .expect("unimplemented: enum discriminant size > u32 ");
-                                BinaryenIndex(discr_val)
-                            })
-                            .collect::<Vec<_>>();
-
-                        // wasm also requires to have a "default" branch, even though this is less
-                        // useful to us as we have a target for every variant.
-                        // TODO: figure out the best way to handle this, maybe add an unreachable
-                        // block to trigger an error. In the meantime, consider the edge to the
-                        // first variant as the default branch. And apparently the LLVM backend
-                        // emits a random branch as the default one.
-                        let (labels_ptr, labels_count) = if variants.contains(&0) {
-                            (ptr::null(), 0)
-                        } else {
-                            (labels.as_ptr(), labels.len())
-                        };
-
-                        unsafe {
-                            RelooperAddBranchForSwitch(relooper_blocks[i],
-                                                       relooper_blocks[target],
-                                                       labels_ptr,
-                                                       BinaryenIndex(labels_count as _),
-                                                       BinaryenExpressionRef(ptr::null_mut()));
-                        }
-                    }
-                }
+                // TerminatorKind::If { ref cond, ref targets } => {
+                //     debug!("emitting Branches for If, from bb{} to bb{} and bb{}",
+                //            i,
+                //            targets.0.index(),
+                //            targets.1.index());
+                //
+                //     let cond = self.trans_operand(cond);
+                //
+                //     unsafe {
+                //         RelooperAddBranch(relooper_blocks[i],
+                //                           relooper_blocks[targets.0.index()],
+                //                           cond,
+                //                           BinaryenExpressionRef(ptr::null_mut()));
+                //         RelooperAddBranch(relooper_blocks[i],
+                //                           relooper_blocks[targets.1.index()],
+                //                           BinaryenExpressionRef(ptr::null_mut()),
+                //                           BinaryenExpressionRef(ptr::null_mut()));
+                //     }
+                // }
+                // TerminatorKind::Switch { ref adt_def, ref targets, .. } => {
+                //     // We're required to have only unique (from, to) edges, while we have
+                //     // a variant to target mapping, where multiple variants can branch to
+                //     // the same target block. So group them by target block index.
+                //     let target_per_variant = targets.iter().map(|&t| t.index());
+                //     let mut variants_per_target = HashMap::new();
+                //     for (variant, target) in target_per_variant.enumerate() {
+                //         match variants_per_target.entry(target) {
+                //             Entry::Vacant(entry) => {
+                //                 entry.insert(vec![variant]);
+                //             }
+                //             Entry::Occupied(mut entry) => {
+                //                 entry.get_mut().push(variant);
+                //             }
+                //         }
+                //     }
+                //
+                //     for (target, variants) in variants_per_target {
+                //         debug!("emitting Switch branch from bb{} to bb{}, for Enum '{:?}' \
+                //                 variants {:?}",
+                //                i,
+                //                target,
+                //                adt_def,
+                //                variants);
+                //
+                //         // TODO: is it necessary to handle cases where the discriminant is not a
+                //         // valid u32 ? (doubtful)
+                //         let labels = variants.iter()
+                //             .map(|&v| {
+                //                 let discr_val = adt_def.variants[v]
+                //                     .disr_val
+                //                     .to_u32()
+                //                     .expect("unimplemented: enum discriminant size > u32 ");
+                //                 BinaryenIndex(discr_val)
+                //             })
+                //             .collect::<Vec<_>>();
+                //
+                //         // wasm also requires to have a "default" branch, even though this is less
+                //         // useful to us as we have a target for every variant.
+                //         // TODO: figure out the best way to handle this, maybe add an unreachable
+                //         // block to trigger an error. In the meantime, consider the edge to the
+                //         // first variant as the default branch. And apparently the LLVM backend
+                //         // emits a random branch as the default one.
+                //         let (labels_ptr, labels_count) = if variants.contains(&0) {
+                //             (ptr::null(), 0)
+                //         } else {
+                //             (labels.as_ptr(), labels.len())
+                //         };
+                //
+                //         unsafe {
+                //             RelooperAddBranchForSwitch(relooper_blocks[i],
+                //                                        relooper_blocks[target],
+                //                                        labels_ptr,
+                //                                        BinaryenIndex(labels_count as _),
+                //                                        BinaryenExpressionRef(ptr::null_mut()));
+                //         }
+                //     }
+                // }
                 TerminatorKind::Return => {
                     // handled during bb creation
                 }
@@ -707,7 +716,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             self.fun_types.insert(self.sig.clone(), ty);
         }
 
-        let nid = self.tcx.map.as_local_node_id(self.did).expect("");
+        let nid = self.tcx.hir.as_local_node_id(self.did).expect("");
 
         unsafe {
             if Some(self.did) == self.tcx.lang_items.panic_fn() {
@@ -1054,8 +1063,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
                             Layout::General { discr, ref variants, .. } => {
                                 if let AggregateKind::Adt(ref adt_def, variant, _, _) = *kind {
-                                    let discr_val =
-                                        adt_def.variants[variant].disr_val.to_u32().unwrap();
+                                    let discr_val = adt_def.variants[variant].disr_val as u32;
                                     let discr_size = discr.size().bytes() as u32;
 
                                     debug!("allocating Enum '{:?}' in linear memory to \
@@ -1109,7 +1117,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     // TODO: handle signed vs unsigned here as well, or just in the
                                     // BinOps ?
                                     let discr_val = adt_def.variants[variant].disr_val;
-                                    let discr_val = discr_val.to_u32().unwrap();
+                                    let discr_val = discr_val as u32;
 
                                     // set enum discr
                                     unsafe {
@@ -1479,35 +1487,35 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
     fn trans_fn(&mut self,
                 fn_did: DefId,
-                substs: &'tcx Substs<'tcx>,
-                sig: &FnSig<'tcx>)
-                -> (FnSig<'tcx>, DefId) {
+                substs: &Substs<'gcx>,
+                sig: FnSig<'gcx>)
+                -> (FnSig<'gcx>, DefId) {
         let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
 
-        let (substs, sig): (&'tcx Substs<'tcx>, &FnSig<'tcx>) = if !is_trait_method {
+        let (substs, sig) = if !is_trait_method {
             (substs, sig)
         } else {
-            let (resolved_def_id, resolved_substs): (_, &'tcx Substs<'tcx>) =
-                panic!();//traits::resolve_trait_method(self.tcx, fn_did, substs);
-            let ty = self.tcx.item_type(resolved_def_id);
-            // TODO: investigate rustc trans use of
-            // liberate_bound_regions or similar here
-            let sig = ty.fn_sig().skip_binder();
-
-            fn_did = resolved_def_id;
-            (resolved_substs, sig)
+            panic!();
+            // let (resolved_def_id, resolved_substs) = traits::resolve_trait_method(self.tcx, fn_did, substs);
+            // let ty = self.tcx.item_type(resolved_def_id);
+            // // TODO: investigate rustc trans use of
+            // // liberate_bound_regions or similar here
+            // let sig = *ty.fn_sig().skip_binder();
+            //
+            // fn_did = resolved_def_id;
+            // (resolved_substs, sig)
         };
 
         let mir = {
             self.tcx.mir_map.borrow()[&fn_did]
         };
 
-        let fn_sig: FnSig<'tcx> = monomorphize::apply_param_substs(self.tcx, substs, &sig);
+        let fn_sig = sig.clone(); //sig.subst(self.tcx, substs);//monomorphize::apply_substs(self.tcx, substs, &sig);
 
         // mark the fn defid seen to not have translated twice
         // TODO: verify this more thoroughly, works for our limited
         // tests right now
-        if sig != &fn_sig {
+        if sig != fn_sig {
             let fn_name = sanitize_symbol(&self.tcx
                 .item_path_str(fn_did));
             let fn_name = CString::new(fn_name).expect("");
@@ -1545,7 +1553,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     }
 
     fn trans_fn_name_direct(&mut self,
-                            operand: &Operand<'tcx>)
+                            operand: &Operand<'gcx>)
                             -> Option<(*const c_char, BinaryenType, BinaryenCallKind, bool)> {
         match operand {
             &Operand::Constant(ref c) => {
@@ -1570,7 +1578,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     self.import_wasm_extern(fn_did, sig);
                                 }
                                 _ => {
-                                    let (fn_sig_, fn_did_) = self.trans_fn(fn_did, substs, sig);
+                                    let (fn_sig_, fn_did_) = self.trans_fn(fn_did, substs, sig.clone());
                                     fn_sig = fn_sig_;
                                     fn_did = fn_did_;
                                 }
@@ -1680,7 +1688,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         }
     }
 
-    fn import_wasm_extern(&mut self, did: DefId, sig: &ty::FnSig<'tcx>) {
+    fn import_wasm_extern(&mut self, did: DefId, sig: &ty::FnSig<'gcx>) {
         if self.fun_names.contains_key(&(did, sig.clone())) {
             return;
         }
