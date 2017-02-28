@@ -1355,57 +1355,57 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                     None => return None,
                 }
             }
-            // Lvalue::Projection(ref projection) => {
-            //     let base = match self.trans_lval(&projection.base) {
-            //         Some(base) => base,
-            //         None => return None,
-            //     };
-            //     let base_ty = projection.base.ty(&*mir, self.tcx).to_ty(self.tcx);
-            //     let base_layout = self.type_layout(base_ty);
-            //
-            //     match projection.elem {
-            //         ProjectionElem::Deref => {
-            //             if base.offset.is_none() {
-            //                 return Some(BinaryenLvalue::new(base.index, None, LvalueExtra::None));
-            //             }
-            //             panic!("unimplemented Deref {:?}", lvalue);
-            //         }
-            //         ProjectionElem::Field(ref field, _) => {
-            //             let variant = match *base_layout {
-            //                 Layout::Univariant { ref variant, .. } => variant,
-            //                 Layout::General { ref variants, .. } => {
-            //                     if let LvalueExtra::DowncastVariant(variant_idx) = base.extra {
-            //                         &variants[variant_idx]
-            //                     } else {
-            //                         panic!("field access on enum had no variant index");
-            //                     }
-            //                 }
-            //                 _ => panic!("unimplemented Field Projection: {:?}", projection),
-            //             };
-            //
-            //             let offset = variant.offsets[field.index()].bytes() as u32;
-            //             return Some(BinaryenLvalue::new(base.index,
-            //                                             base.offset,
-            //                                             LvalueExtra::None)
-            //                 .offset(offset));
-            //         }
-            //         ProjectionElem::Downcast(_, variant) => {
-            //             match *base_layout {
-            //                 Layout::General { discr, .. } => {
-            //                     assert!(base.offset.is_none(),
-            //                             "unimplemented Downcast Projection with offset");
-            //
-            //                     let offset = discr.size().bytes() as u32;
-            //                     return Some(
-            //                         BinaryenLvalue::new(base.index, Some(offset),
-            //                                             LvalueExtra::DowncastVariant(variant)));
-            //                 }
-            //                 _ => panic!("unimplemented Downcast Projection: {:?}", projection),
-            //             }
-            //         }
-            //         _ => panic!("unimplemented Projection: {:?}", projection),
-            //     }
-            // }
+            Lvalue::Projection(ref projection) => {
+                let base = match self.trans_lval(&projection.base) {
+                    Some(base) => base,
+                    None => return None,
+                };
+                let base_ty = projection.base.ty(&*mir, self.tcx).to_ty(self.tcx);
+                let base_layout = self.type_layout(base_ty);
+
+                match projection.elem {
+                    ProjectionElem::Deref => {
+                        if base.offset.is_none() {
+                            return Some(BinaryenLvalue::new(base.index, None, LvalueExtra::None));
+                        }
+                        panic!("unimplemented Deref {:?}", lvalue);
+                    }
+                    ProjectionElem::Field(ref field, _) => {
+                        let variant = match *base_layout {
+                            Layout::Univariant { ref variant, .. } => variant,
+                            Layout::General { ref variants, .. } => {
+                                if let LvalueExtra::DowncastVariant(variant_idx) = base.extra {
+                                    &variants[variant_idx]
+                                } else {
+                                    panic!("field access on enum had no variant index");
+                                }
+                            }
+                            _ => panic!("unimplemented Field Projection: {:?}", projection),
+                        };
+
+                        let offset = variant.offsets[field.index()].bytes() as u32;
+                        return Some(BinaryenLvalue::new(base.index,
+                                                        base.offset,
+                                                        LvalueExtra::None)
+                            .offset(offset));
+                    }
+                    ProjectionElem::Downcast(_, variant) => {
+                        match *base_layout {
+                            Layout::General { discr, .. } => {
+                                assert!(base.offset.is_none(),
+                                        "unimplemented Downcast Projection with offset");
+
+                                let offset = discr.size().bytes() as u32;
+                                return Some(
+                                    BinaryenLvalue::new(base.index, Some(offset),
+                                                        LvalueExtra::DowncastVariant(variant)));
+                            }
+                            _ => panic!("unimplemented Downcast Projection: {:?}", projection),
+                        }
+                    }
+                    _ => panic!("unimplemented Projection: {:?}", projection),
+                }
+            }
             _ => panic!("unimplemented Lvalue: {:?}", lvalue),
         };
 
