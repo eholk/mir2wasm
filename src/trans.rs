@@ -10,7 +10,6 @@ use rustc::ty::{self, TyCtxt, Ty, FnSig};
 use rustc::ty::layout::{self, Layout, Size};
 use rustc::ty::subst::Substs;
 use rustc::hir::intravisit::{self, Visitor, FnKind, NestedVisitorMap};
-use rustc::hir::itemlikevisit::DeepVisitor;
 use rustc::hir::{FnDecl, BodyId};
 use rustc::hir::def_id::DefId;
 use rustc::traits::Reveal;
@@ -48,13 +47,13 @@ impl WasmTransOptions {
     }
 }
 
-fn visit_krate<'g, 'gcx, 'tcx>(tcx: TyCtxt<'g, 'gcx, 'tcx>,
+fn visit_krate<'g, 'tcx>(tcx: TyCtxt<'g, 'tcx, 'tcx>,
                          module: builder::Module,
                          entry_fn: Option<NodeId>)
                          -> builder::Module {
     // TODO determine correct crate-visiting semantics
     //tcx.map.krate().visit_all_items(v);
-    let mut context: BinaryenModuleCtxt<'g, 'gcx, 'tcx> = BinaryenModuleCtxt::new(tcx, module, entry_fn);
+    let mut context: BinaryenModuleCtxt = BinaryenModuleCtxt::new(tcx, module, entry_fn);
     tcx.visit_all_item_likes_in_krate(DepNode::Mir, &mut context.as_deep_visitor());
     //intravisit::walk_crate(v, tcx.map.krate());
     context.module
@@ -147,7 +146,7 @@ impl<'c, 'gcx: 'c + 'tcx, 'tcx: 'c> BinaryenModuleCtxt<'c, 'gcx, 'tcx> {
 // TODO: investigate where should the preferred location be
 const STACK_POINTER_ADDRESS: i32 = 0;
 
-impl<'e, 'gcx, 'tcx: 'e, 'h> Visitor<'h> for BinaryenModuleCtxt<'e, 'gcx, 'tcx> {
+impl<'e, 'tcx: 'e, 'h> Visitor<'h> for BinaryenModuleCtxt<'e, 'tcx, 'tcx> {
     fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'h> {
         NestedVisitorMap::None
     }
@@ -193,7 +192,7 @@ impl<'e, 'gcx, 'tcx: 'e, 'h> Visitor<'h> for BinaryenModuleCtxt<'e, 'gcx, 'tcx> 
 
 struct BinaryenFnCtxt<'d, 'gcx: 'd + 'tcx, 'tcx: 'd, 'module> {
     tcx: TyCtxt<'d, 'gcx, 'tcx>,
-    mir: &'d RefCell<Mir<'gcx>>,
+    mir: &'d RefCell<Mir<'tcx>>,
     did: DefId,
     sig: &'d FnSig<'gcx>,
     func: builder::Fn<'module>,
@@ -235,10 +234,11 @@ impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 
         debug!("index 0 means retvar");
         return self.ret_var;
     }
+}
 
+impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
     /// This is the main entry point for MIR->wasm fn translation
     fn trans(&'module mut self) {
-
         let mir = self.mir.borrow();
 
         // Maintain a cache of translated monomorphizations and bail
@@ -1355,57 +1355,57 @@ impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 
                     None => return None,
                 }
             }
-            Lvalue::Projection(ref projection) => {
-                let base = match self.trans_lval(&projection.base) {
-                    Some(base) => base,
-                    None => return None,
-                };
-                let base_ty = projection.base.ty(&*mir, self.tcx).to_ty(self.tcx);
-                let base_layout = self.type_layout(base_ty);
-
-                match projection.elem {
-                    ProjectionElem::Deref => {
-                        if base.offset.is_none() {
-                            return Some(BinaryenLvalue::new(base.index, None, LvalueExtra::None));
-                        }
-                        panic!("unimplemented Deref {:?}", lvalue);
-                    }
-                    ProjectionElem::Field(ref field, _) => {
-                        let variant = match *base_layout {
-                            Layout::Univariant { ref variant, .. } => variant,
-                            Layout::General { ref variants, .. } => {
-                                if let LvalueExtra::DowncastVariant(variant_idx) = base.extra {
-                                    &variants[variant_idx]
-                                } else {
-                                    panic!("field access on enum had no variant index");
-                                }
-                            }
-                            _ => panic!("unimplemented Field Projection: {:?}", projection),
-                        };
-
-                        let offset = variant.offsets[field.index()].bytes() as u32;
-                        return Some(BinaryenLvalue::new(base.index,
-                                                        base.offset,
-                                                        LvalueExtra::None)
-                            .offset(offset));
-                    }
-                    ProjectionElem::Downcast(_, variant) => {
-                        match *base_layout {
-                            Layout::General { discr, .. } => {
-                                assert!(base.offset.is_none(),
-                                        "unimplemented Downcast Projection with offset");
-
-                                let offset = discr.size().bytes() as u32;
-                                return Some(
-                                    BinaryenLvalue::new(base.index, Some(offset),
-                                                        LvalueExtra::DowncastVariant(variant)));
-                            }
-                            _ => panic!("unimplemented Downcast Projection: {:?}", projection),
-                        }
-                    }
-                    _ => panic!("unimplemented Projection: {:?}", projection),
-                }
-            }
+            // Lvalue::Projection(ref projection) => {
+            //     let base = match self.trans_lval(&projection.base) {
+            //         Some(base) => base,
+            //         None => return None,
+            //     };
+            //     let base_ty = projection.base.ty(&*mir, self.tcx).to_ty(self.tcx);
+            //     let base_layout = self.type_layout(base_ty);
+            //
+            //     match projection.elem {
+            //         ProjectionElem::Deref => {
+            //             if base.offset.is_none() {
+            //                 return Some(BinaryenLvalue::new(base.index, None, LvalueExtra::None));
+            //             }
+            //             panic!("unimplemented Deref {:?}", lvalue);
+            //         }
+            //         ProjectionElem::Field(ref field, _) => {
+            //             let variant = match *base_layout {
+            //                 Layout::Univariant { ref variant, .. } => variant,
+            //                 Layout::General { ref variants, .. } => {
+            //                     if let LvalueExtra::DowncastVariant(variant_idx) = base.extra {
+            //                         &variants[variant_idx]
+            //                     } else {
+            //                         panic!("field access on enum had no variant index");
+            //                     }
+            //                 }
+            //                 _ => panic!("unimplemented Field Projection: {:?}", projection),
+            //             };
+            //
+            //             let offset = variant.offsets[field.index()].bytes() as u32;
+            //             return Some(BinaryenLvalue::new(base.index,
+            //                                             base.offset,
+            //                                             LvalueExtra::None)
+            //                 .offset(offset));
+            //         }
+            //         ProjectionElem::Downcast(_, variant) => {
+            //             match *base_layout {
+            //                 Layout::General { discr, .. } => {
+            //                     assert!(base.offset.is_none(),
+            //                             "unimplemented Downcast Projection with offset");
+            //
+            //                     let offset = discr.size().bytes() as u32;
+            //                     return Some(
+            //                         BinaryenLvalue::new(base.index, Some(offset),
+            //                                             LvalueExtra::DowncastVariant(variant)));
+            //                 }
+            //                 _ => panic!("unimplemented Downcast Projection: {:?}", projection),
+            //             }
+            //         }
+            //         _ => panic!("unimplemented Projection: {:?}", projection),
+            //     }
+            // }
             _ => panic!("unimplemented Lvalue: {:?}", lvalue),
         };
 
@@ -1484,41 +1484,12 @@ impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 
         }
     }
 
-    #[inline]
-    fn type_size(&self, ty: Ty<'tcx>) -> usize {
-        let substs = Substs::empty();
-        self.type_size_with_substs(ty, substs)
-    }
-
-    // Imported from miri
-    #[inline]
-    fn type_size_with_substs(&self, ty: Ty<'tcx>, substs: &'tcx Substs<'tcx>) -> usize {
-        self.type_layout_with_substs(ty, substs).size(&self.tcx.data_layout).bytes() as usize
-    }
-
-    #[inline]
-    fn type_layout(&self, ty: Ty<'tcx>) -> &'tcx Layout {
-        let substs = Substs::empty();
-        self.type_layout_with_substs(ty, substs)
-    }
-
-    // Imported from miri and slightly modified to adapt to our monomorphize api
-    fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &Substs<'tcx>) -> &'tcx Layout {
-        unimplemented!();
-        // // TODO(solson): Is this inefficient? Needs investigation.
-        // let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
-        //
-        // self.tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
-        //     // TODO(solson): Report this error properly.
-        //     ty.layout(&infcx).unwrap()
-        // })
-    }
 
     fn trans_fn(&mut self,
                 fn_did: DefId,
-                substs: &Substs<'gcx>,
-                sig: FnSig<'gcx>)
-                -> (FnSig<'gcx>, DefId) {
+                substs: &Substs<'tcx>,
+                sig: FnSig<'tcx>)
+                -> (FnSig<'tcx>, DefId) {
         let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
 
         let (substs, sig) = if !is_trait_method {
@@ -1582,7 +1553,7 @@ impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 
     }
 
     fn trans_fn_name_direct(&mut self,
-                            operand: &Operand<'gcx>)
+                            operand: &Operand<'tcx>)
                             -> Option<(*const c_char, BinaryenType, BinaryenCallKind, bool)> {
         match operand {
             &Operand::Constant(ref c) => {
@@ -1717,7 +1688,7 @@ impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 
         }
     }
 
-    fn import_wasm_extern(&mut self, did: DefId, sig: &ty::FnSig<'gcx>) {
+    fn import_wasm_extern(&mut self, did: DefId, sig: &ty::FnSig<'tcx>) {
         if self.fun_names.contains_key(&(did, sig.clone())) {
             return;
         }
@@ -1749,6 +1720,36 @@ impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 
                               print_fn,
                               print_i32_ty);
         }
+    }
+
+    // Imported from miri and slightly modified to adapt to our monomorphize api
+    fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &Substs<'tcx>) -> &'tcx Layout {
+        // TODO(solson): Is this inefficient? Needs investigation.
+        //let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
+
+        self.tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
+            // TODO(solson): Report this error properly.
+            ty.layout(&infcx).unwrap()
+        })
+    }
+
+    #[inline]
+    fn type_size(&self, ty: Ty<'tcx>) -> usize {
+        let substs = Substs::empty();
+        self.type_size_with_substs(ty, substs)
+    }
+
+
+    // Imported from miri
+    #[inline]
+    fn type_size_with_substs(&self, ty: Ty<'tcx>, substs: &'tcx Substs<'tcx>) -> usize {
+        self.type_layout_with_substs(ty, substs).size(&self.tcx.data_layout).bytes() as usize
+    }
+
+    #[inline]
+    fn type_layout(&self, ty: Ty<'tcx>) -> &'tcx Layout {
+        let substs = Substs::empty();
+        self.type_layout_with_substs(ty, substs)
     }
 }
 
