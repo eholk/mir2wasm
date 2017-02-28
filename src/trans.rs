@@ -1487,36 +1487,35 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
 
     fn trans_fn(&mut self,
-                fn_did: DefId,
+                mut fn_did: DefId,
                 substs: &Substs<'tcx>,
                 sig: FnSig<'tcx>)
                 -> (FnSig<'tcx>, DefId) {
         let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
 
         let (substs, sig) = if !is_trait_method {
-            (substs, sig)
+            (substs, &sig)
         } else {
-            panic!();
-            // let (resolved_def_id, resolved_substs) = traits::resolve_trait_method(self.tcx, fn_did, substs);
-            // let ty = self.tcx.item_type(resolved_def_id);
-            // // TODO: investigate rustc trans use of
-            // // liberate_bound_regions or similar here
-            // let sig = *ty.fn_sig().skip_binder();
-            //
-            // fn_did = resolved_def_id;
-            // (resolved_substs, sig)
+            let (resolved_def_id, resolved_substs) = traits::resolve_trait_method(self.tcx, fn_did, substs);
+            let ty = self.tcx.item_type(resolved_def_id);
+            // TODO: investigate rustc trans use of
+            // liberate_bound_regions or similar here
+            let sig = ty.fn_sig().skip_binder();
+
+            fn_did = resolved_def_id;
+            (resolved_substs, sig)
         };
 
         let mir = {
             self.tcx.mir_map.borrow()[&fn_did]
         };
 
-        let fn_sig = monomorphize::apply_substs(self.tcx, substs, &sig);
+        let fn_sig = monomorphize::apply_substs(self.tcx, substs, sig);
 
         // mark the fn defid seen to not have translated twice
         // TODO: verify this more thoroughly, works for our limited
         // tests right now
-        if sig != fn_sig {
+        if sig != &fn_sig {
             let fn_name = sanitize_symbol(&self.tcx
                 .item_path_str(fn_did));
             let fn_name = CString::new(fn_name).expect("");
