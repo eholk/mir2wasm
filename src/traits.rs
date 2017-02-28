@@ -1,7 +1,6 @@
 use rustc::ty::{self, TyCtxt};
 use rustc::hir::def_id::DefId;
 
-use std::rc::Rc;
 use rustc::traits::{self, Reveal};
 use rustc::ty::subst::Substs;
 use rustc::ty::fold::TypeFoldable;

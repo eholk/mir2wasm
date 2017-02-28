@@ -1,5 +1,5 @@
 use rustc::ty::subst::{Subst, Substs};
-use rustc::ty::{FnSig, Ty, TyCtxt, TypeFoldable};
+use rustc::ty::{TyCtxt, TypeFoldable};
 use rustc::infer::TransNormalize;
 
 pub fn apply_substs<'a, 'tcx, T>(tcx: TyCtxt<'a, 'tcx, 'tcx>,

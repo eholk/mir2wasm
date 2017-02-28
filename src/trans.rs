@@ -13,13 +13,11 @@ use rustc::hir::intravisit::{self, Visitor, FnKind, NestedVisitorMap};
 use rustc::hir::{FnDecl, BodyId};
 use rustc::hir::def_id::DefId;
 use rustc::traits::Reveal;
-use rustc::ty::subst::Subst;
 use syntax::ast::{NodeId, IntTy, UintTy, FloatTy};
 use syntax::codemap::Span;
 use std::ffi::CString;
 use std::ptr;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::cell::RefCell;
 use binaryen::*;
 use monomorphize;
@@ -344,7 +342,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 }
             }
 
-            let mut block_kind = BinaryenBlockKind::Default;
+            let block_kind = BinaryenBlockKind::Default;
 
             // Some features of MIR terminators tranlate to wasm
             // expressions, some translate to relooper edges. These
@@ -737,7 +735,6 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         if !self.fun_types.contains_key(self.sig) {
             let name = format!("rustfn-{}-{}", self.did.krate, self.did.index.as_u32());
             let name = CString::new(name).expect("");
-            let name_ptr = name.as_ptr();
             self.c_strings.push(name);
             let name = &self.c_strings[self.c_strings.len() - 1];
             let ty = self.func.create_sig_type(name, binaryen_ret);

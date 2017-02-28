@@ -191,23 +191,10 @@ impl<'module> Fn<'module> {
     }
 
     // TODO: this should be private
-    pub fn binaryen_vars(&self) -> Vec<sys::BinaryenIndex> {
-        (0..self.vars.len()).map(|x| x.into()).collect()
-    }
-
-    // TODO: this should be private
     pub fn binaryen_var_types(&self) -> Vec<sys::BinaryenType> {
         self.vars[self.num_args..].iter().map(|x| x.into()).collect()
     }
 
-    // TODO: this should be private
-    pub fn binaryen_arg_types(&self) -> Vec<sys::BinaryenType> {
-        self.vars[0..self.num_args].iter().map(|x| x.into()).collect()
-    }
-
-    pub fn num_args(&self) -> usize {
-        self.num_args
-    }
     pub fn num_vars(&self) -> usize {
         self.vars.len()
     }
