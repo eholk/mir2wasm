@@ -14,7 +14,7 @@ install the current rustc nightly version:
 ```sh
 git clone https://github.com/brson/mir2wasm.git
 cd mir2wasm
-rustup override set nightly-2017-01-13
+rustup override set nightly-2017-02-26
 ```
 
 ```sh

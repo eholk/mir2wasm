@@ -208,6 +208,34 @@ struct BinaryenFnCtxt<'d, 'gcx: 'd + 'tcx, 'tcx: 'd, 'module> {
 }
 
 impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 'module> {
+    fn num_args(&self) -> usize {
+        self.sig.inputs().len()
+    }
+
+    fn get_local_index(&self, i: usize) -> Option<usize> {
+        debug!("fetching local {:?}", i);
+        debug!("vars: {:?}", self.var_map);
+        debug!("temps: {:?}", self.temp_map);
+        if i < self.num_args() {
+            debug!("returning function arg {}", i);
+            return Some(i);
+        }
+        let i = i - self.num_args();
+        if i < self.var_map.len() {
+            debug!("returning {}th local", i);
+            return self.var_map[i];
+        }
+        let i = i - self.var_map.len();
+        if i < self.temp_map.len() {
+        debug!("returning {}th temp", i);
+        return self.temp_map[i];
+    }
+        let i = i - self.temp_map.len();
+        assert!(i == 0);
+        debug!("index 0 means retvar");
+        return self.ret_var;
+    }
+
     /// This is the main entry point for MIR->wasm fn translation
     fn trans(&'module mut self) {
 
@@ -244,7 +272,6 @@ impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 
 
         // Create the wasm vars.
         // Params and vars form the list of locals, both sharing the same index space.
-
         for mir_var in mir.vars_iter() {
             debug!("adding local {:?}", mir_var);
             match rust_ty_to_builder(mir.local_decls[mir_var].ty) {
@@ -1319,10 +1346,12 @@ impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 
     fn trans_lval(&mut self, lvalue: &Lvalue<'tcx>) -> Option<BinaryenLvalue> {
         let mir = self.mir.borrow();
 
+        debug!("translating lval: {:?}", lvalue);
+
         let i = match *lvalue {
             Lvalue::Local(i) => {
-                match self.var_map[i.index()] {
-                    Some(i) => i.index() as u32,
+                match self.get_local_index(i.index()) {
+                    Some(i) => i as u32,
                     None => return None,
                 }
             }
