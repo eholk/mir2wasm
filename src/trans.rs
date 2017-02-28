@@ -49,11 +49,8 @@ fn visit_krate<'g, 'tcx>(tcx: TyCtxt<'g, 'tcx, 'tcx>,
                          module: builder::Module,
                          entry_fn: Option<NodeId>)
                          -> builder::Module {
-    // TODO determine correct crate-visiting semantics
-    //tcx.map.krate().visit_all_items(v);
     let mut context: BinaryenModuleCtxt = BinaryenModuleCtxt::new(tcx, module, entry_fn);
     tcx.visit_all_item_likes_in_krate(DepNode::Mir, &mut context.as_deep_visitor());
-    //intravisit::walk_crate(v, tcx.map.krate());
     context.module
 }
 
@@ -270,6 +267,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
         // Create the wasm vars.
         // Params and vars form the list of locals, both sharing the same index space.
+
+        // TODO(eholk): Use mir.local_decls directly rather than the two iterators.
         for mir_var in mir.vars_iter() {
             debug!("adding local {:?}: {:?}",
                    mir_var,
@@ -1145,7 +1144,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                     // TODO: handle signed vs unsigned here as well, or just in the
                                     // BinOps ?
                                     let discr_val = adt_def.variants[variant].disr_val;
-                                    let discr_val = discr_val as u32;
+                                    let discr_val = discr_val as i32;
 
                                     // set enum discr
                                     unsafe {
@@ -1157,7 +1156,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                                discr_val);
                                         let discr_val =
                                             BinaryenConst(self.func.module.module,
-                                                          BinaryenLiteralInt32(discr_val as i32));
+                                                          BinaryenLiteralInt32(discr_val));
                                         let write_discr = BinaryenSetLocal(self.func.module.module,
                                                                            dest.index,
                                                                            discr_val);
