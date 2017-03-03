@@ -257,6 +257,12 @@ impl From<usize> for sys::BinaryenIndex {
     }
 }
 
+impl From<u32> for sys::BinaryenIndex {
+    fn from(i: u32) -> sys::BinaryenIndex {
+        sys::BinaryenIndex(i)
+    }
+}
+
 impl From<Var> for sys::BinaryenIndex {
     fn from(i: Var) -> sys::BinaryenIndex {
         i.index().into()

@@ -344,9 +344,9 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 }
             }
 
-            let block_kind = BinaryenBlockKind::Default;
+            let block_kind;
 
-            // Some features of MIR terminators tranlate to wasm
+            // Some features of MIR terminators translate to wasm
             // expressions, some translate to relooper edges. These
             // are the expressions.
             match bb.terminator().kind {
@@ -379,6 +379,11 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                     };
                     let expr = unsafe { BinaryenReturn(self.func.module.module, expr) };
                     binaryen_stmts.push(expr);
+                    block_kind = BinaryenBlockKind::Default;
+                }
+                TerminatorKind::SwitchInt{ ref discr, ref switch_ty, ref values, ref targets } => {
+                    let discr = self.trans_operand(discr);
+                    block_kind = BinaryenBlockKind::Switch(discr);
                 }
                 // TerminatorKind::Switch { ref discr, .. } => {
                 //     let adt = self.trans_lval(discr).unwrap();
@@ -583,15 +588,19 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                     } else {
                         panic!("untranslated fn call to {:?}", func)
                     }
+                    block_kind = BinaryenBlockKind::Default;
                 },
-                _ => (),
+                TerminatorKind::Goto {..} => {
+                    block_kind = BinaryenBlockKind::Default;
+                }
+                _ => panic!("unimplemented terminator: {:?}", bb.terminator().kind),
             }
-            unsafe {
-                let name = format!("bb{}", i);
-                let name = CString::new(name).expect("");
-                let name_ptr = name.as_ptr();
-                self.c_strings.push(name);
+            let name = format!("bb{}", i);
+            let name = CString::new(name).expect("");
+            let name_ptr = name.as_ptr();
+            self.c_strings.push(name);
 
+            unsafe {
                 debug!("emitting {}-statement Block bb{}", binaryen_stmts.len(), i);
                 let binaryen_expr = BinaryenBlock(self.func.module.module,
                                                   name_ptr,
@@ -609,6 +618,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
         // Create the relooper edges from the bb terminators
         for (i, bb) in mir.basic_blocks().iter().enumerate() {
+            debug!("{:?}", (i, bb));
             match bb.terminator().kind {
                 TerminatorKind::Goto { ref target } => {
                     debug!("emitting Branch for Goto, from bb{} to bb{}",
@@ -621,83 +631,28 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                           BinaryenExpressionRef(ptr::null_mut()));
                     }
                 }
-                // TerminatorKind::If { ref cond, ref targets } => {
-                //     debug!("emitting Branches for If, from bb{} to bb{} and bb{}",
-                //            i,
-                //            targets.0.index(),
-                //            targets.1.index());
-                //
-                //     let cond = self.trans_operand(cond);
-                //
-                //     unsafe {
-                //         RelooperAddBranch(relooper_blocks[i],
-                //                           relooper_blocks[targets.0.index()],
-                //                           cond,
-                //                           BinaryenExpressionRef(ptr::null_mut()));
-                //         RelooperAddBranch(relooper_blocks[i],
-                //                           relooper_blocks[targets.1.index()],
-                //                           BinaryenExpressionRef(ptr::null_mut()),
-                //                           BinaryenExpressionRef(ptr::null_mut()));
-                //     }
-                // }
-                // TerminatorKind::Switch { ref adt_def, ref targets, .. } => {
-                //     // We're required to have only unique (from, to) edges, while we have
-                //     // a variant to target mapping, where multiple variants can branch to
-                //     // the same target block. So group them by target block index.
-                //     let target_per_variant = targets.iter().map(|&t| t.index());
-                //     let mut variants_per_target = HashMap::new();
-                //     for (variant, target) in target_per_variant.enumerate() {
-                //         match variants_per_target.entry(target) {
-                //             Entry::Vacant(entry) => {
-                //                 entry.insert(vec![variant]);
-                //             }
-                //             Entry::Occupied(mut entry) => {
-                //                 entry.get_mut().push(variant);
-                //             }
-                //         }
-                //     }
-                //
-                //     for (target, variants) in variants_per_target {
-                //         debug!("emitting Switch branch from bb{} to bb{}, for Enum '{:?}' \
-                //                 variants {:?}",
-                //                i,
-                //                target,
-                //                adt_def,
-                //                variants);
-                //
-                //         // TODO: is it necessary to handle cases where the discriminant is not a
-                //         // valid u32 ? (doubtful)
-                //         let labels = variants.iter()
-                //             .map(|&v| {
-                //                 let discr_val = adt_def.variants[v]
-                //                     .discr
-                //                     .to_u32()
-                //                     .expect("unimplemented: enum discriminant size > u32 ");
-                //                 BinaryenIndex(discr_val)
-                //             })
-                //             .collect::<Vec<_>>();
-                //
-                //         // wasm also requires to have a "default" branch, even though this is
-                //         // less useful to us as we have a target for every variant.
-                //         // TODO: figure out the best way to handle this, maybe add an
-                //         // unreachable block to trigger an error. In the meantime, consider the
-                //         // edge to the first variant as the default branch. And apparently the
-                //         // LLVM backend emits a random branch as the default one.
-                //         let (labels_ptr, labels_count) = if variants.contains(&0) {
-                //             (ptr::null(), 0)
-                //         } else {
-                //             (labels.as_ptr(), labels.len())
-                //         };
-                //
-                //         unsafe {
-                //             RelooperAddBranchForSwitch(relooper_blocks[i],
-                //                                        relooper_blocks[target],
-                //                                        labels_ptr,
-                //                                        BinaryenIndex(labels_count as _),
-                //                                        BinaryenExpressionRef(ptr::null_mut()));
-                //         }
-                //     }
-                // }
+                TerminatorKind::SwitchInt{ ref discr, ref switch_ty, ref values, ref targets } => {
+                    let from = relooper_blocks[i];
+
+                    let discr = self.trans_operand(discr);
+
+                    for j in 0..values.len() - 1 {
+                        let value = values[j].to_u32().expect("invalid switch index").into();
+                        let target = targets[j].index();
+                        let value_ptr = &value;
+                        unsafe {
+                            RelooperAddBranchForSwitch(from, relooper_blocks[target], value_ptr, 1u32.into(), discr);
+                        }
+                    }
+
+                    // Add the otherwise branch
+                    unsafe {
+                        RelooperAddBranch(from,
+                                          relooper_blocks[targets[targets.len() - 1].index()],
+                                          BinaryenExpressionRef(ptr::null_mut()),
+                                          BinaryenExpressionRef(ptr::null_mut()));
+                    }
+                }
                 TerminatorKind::Return => {
                     // handled during bb creation
                 }
@@ -1466,6 +1421,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                             let lit = match *value {
                                 ConstVal::Integral(ConstInt::Isize(ConstIsize::Is32(val))) |
                                 ConstVal::Integral(ConstInt::I32(val)) => BinaryenLiteralInt32(val),
+                                ConstVal::Integral(ConstInt::I16(val)) => BinaryenLiteralInt32(val as i32),
                                 // TODO: Since we're at the wasm32 stage, and until wasm64, it's
                                 // probably best if isize is always i32 ?
                                 ConstVal::Integral(ConstInt::Isize(ConstIsize::Is64(val))) => {
