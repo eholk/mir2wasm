@@ -74,7 +74,7 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         BinaryenSetMemory(module.module,
                           mem_size,
                           mem_size,
-                          CString::new("memory").unwrap().as_ptr(),
+                          CString::new("memory").expect("string allocation error").as_ptr(),
                           ptr::null(),
                           ptr::null(),
                           ptr::null(),
@@ -253,7 +253,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
         // Translate arg and ret tys to wasm
         for ty in self.sig.inputs() {
-            self.func.add_arg(rust_ty_to_builder(ty).unwrap());
+            self.func.add_arg(rust_ty_to_builder(ty).expect("arg type has no representation"));
         }
         let mut needs_ret_var = false;
         let ret_ty = self.sig.output();
@@ -294,7 +294,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         if needs_ret_var {
             debug!("adding ret var");
             self.ret_var =
-                Some(self.func.create_local(rust_ty_to_builder(ret_ty).unwrap()).index());
+                Some(self.func.create_local(rust_ty_to_builder(ret_ty).expect("return type has no representation")).index());
         }
 
         // Function prologue: stack pointer local
@@ -464,7 +464,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                            func);
                                     binaryen_stmts.push(b_call);
                                 } else {
-                                    let dest = self.trans_lval(lvalue).unwrap();
+                                    let dest = self.trans_lval(lvalue).expect("error translating lval");
                                     let dest_ty = lvalue.ty(&*mir, self.tcx).to_ty(self.tcx);
                                     let dest_layout = self.type_layout(dest_ty);
 
@@ -593,6 +593,9 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 TerminatorKind::Goto {..} => {
                     block_kind = BinaryenBlockKind::Default;
                 }
+                TerminatorKind::Assert {..} => {
+                    block_kind = BinaryenBlockKind::Default;
+                }
                 _ => panic!("unimplemented terminator: {:?}", bb.terminator().kind),
             }
             let name = format!("bb{}", i);
@@ -656,16 +659,15 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 TerminatorKind::Return => {
                     // handled during bb creation
                 }
-                TerminatorKind::Assert { ref target, .. } => {
-                    // TODO: An assert is not a GOTO!!!
-                    // Fix this!
+                TerminatorKind::Assert { ref target, ref cond, .. } => {
                     debug!("emitting Branch for Goto, from bb{} to bb{}",
                            i,
                            target.index());
+                    let cond = self.trans_operand(cond);
                     unsafe {
                         RelooperAddBranch(relooper_blocks[i],
                                           relooper_blocks[target.index()],
-                                          BinaryenExpressionRef(ptr::null_mut()),
+                                          cond,
                                           BinaryenExpressionRef(ptr::null_mut()));
                     }
                 }
@@ -710,7 +712,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 let var_types = self.func.binaryen_var_types();
                 BinaryenAddFunction(self.func.module.module,
                                     fn_name_ptr,
-                                    *self.fun_types.get(self.sig).unwrap(),
+                                    *self.fun_types.get(self.sig).expect("no type associated with function signature"),
                                     var_types.as_ptr(),
                                     var_types.len().into(),
                                     BinaryenUnreachable(self.func.module.module));
@@ -740,7 +742,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 let var_types = self.func.binaryen_var_types();
                 BinaryenAddFunction(self.func.module.module,
                                     fn_name_ptr,
-                                    *self.fun_types.get(self.sig).unwrap(),
+                                    *self.fun_types.get(self.sig).expect("no type associated with function signature"),
                                     var_types.as_ptr(),
                                     var_types.len().into(),
                                     body);
@@ -920,7 +922,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                                           BinaryenExtendSInt32(),
                                                           right));
 
-                    let checked_local = self.checked_op_local.unwrap();
+                    let checked_local = self.checked_op_local.expect("no check op temporary");
 
                     statements.push(BinaryenSetLocal(self.func.module.module, checked_local, op));
 
@@ -940,7 +942,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                                      BinaryenShrUInt64(),
                                                      BinaryenGetLocal(self.func.module.module,
                                                                       self.checked_op_local
-                                                                          .unwrap(),
+                                                                          .expect("no checked op temporary"),
                                                                       BinaryenInt64()),
                                                      thirty_two));
 
@@ -1453,7 +1455,10 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 -> (FnSig<'tcx>, DefId) {
         let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
 
+        debug!("is_trait_method: {:?}", is_trait_method);
+
         let (substs, sig) = if !is_trait_method {
+            debug!("Using original def_id: {:?}", fn_did);
             (substs, sig)
         } else {
             let (resolved_def_id, resolved_substs) =
@@ -1465,11 +1470,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
             let sig = sig.skip_binder();
 
             fn_did = resolved_def_id;
+            debug!("using alternate def_id: {:?}", fn_did);
             (resolved_substs, sig.clone())
-        };
-
-        let mir = {
-            self.tcx.maps.mir.borrow()[&fn_did]
         };
 
         let fn_sig = monomorphize::apply_substs(self.tcx, substs, &sig);
@@ -1487,6 +1489,11 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         // This simple check is also done in trans() but doing it here
         // helps have a clearer debug log
         if !self.fun_names.contains_key(&(fn_did, fn_sig.clone())) {
+            let map = self.tcx.maps.mir.borrow();
+            let mir = map.get(&fn_did).expect("no mir map present");
+
+            debug!("{:?}", line!());
+
             let mut ctxt = BinaryenFnCtxt {
                 tcx: self.tcx,
                 mir: mir,
@@ -1511,14 +1518,18 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                    self.tcx.item_path_str(self.did));
         }
 
+        debug!("{:?}", line!());
+
         return (fn_sig, fn_did);
     }
 
     fn trans_fn_name_direct(&mut self,
                             operand: &Operand<'tcx>)
                             -> Option<(*const c_char, BinaryenType, BinaryenCallKind, bool)> {
+        debug!("translating {:?}", operand);
         match operand {
             &Operand::Constant(ref c) => {
+                debug!("constant operand: {:?}", c);
                 match c.literal {
                     Literal::Item { def_id, substs } => {
                         let ty = self.tcx.item_type(def_id);
@@ -1531,6 +1542,16 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                             let fn_name = self.tcx.item_path_str(fn_did);
                             let fn_sig;
                             let mut call_kind = BinaryenCallKind::Direct;
+
+                            debug!("fn_name = {:?}", fn_name);
+
+                            // TODO(eholk): find out the correct way to recognize extern fns
+                            if self.tcx.maps.mir.borrow().get(&fn_did).is_none() {
+                                debug!("no mir map present, assuming fn is extern.");
+                                fn_sig = sig.clone();
+                                call_kind = BinaryenCallKind::Import;
+                                self.import_wasm_extern(fn_did, sig);
+                            } else {
 
                             match fn_name.as_ref() {
                                 "wasm::::print_i32" |
@@ -1547,7 +1568,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                     fn_did = fn_did_;
                                 }
                             }
-
+}
                             let ret_ty = if !fn_sig.output().is_nil() {
                                 rust_ty_to_binaryen(fn_sig.output())
                             } else {
@@ -1693,7 +1714,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
         self.tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
             // TODO(solson): Report this error properly.
-            ty.layout(&infcx).unwrap()
+            ty.layout(&infcx).expect("could not reveal inference context")
         })
     }
 

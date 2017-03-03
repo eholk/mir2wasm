@@ -49,8 +49,8 @@ impl PartialEq<i64> for i64 {
 
 }
 
-#[link(name = "c")]
-extern { }
+// #[link(name = "c")]
+// extern { }
 
 //extern { fn puts(s: *const u8); }
 //extern "rust-intrinsic" { fn transmute<T, U>(t: T) -> U; }
@@ -61,6 +61,7 @@ extern { }
 #[no_mangle] pub extern fn rust_eh_register_frames () {}
 #[no_mangle] pub extern fn rust_eh_unregister_frames () {}
 
+#[link(name = "rustrt")]
 extern {
     pub fn panic() -> !;
 }
