@@ -1,27 +1,24 @@
 use libc::c_char;
 use error::*;
-use rustc::mir::repr::*;
-use rustc::mir::mir_map::MirMap;
+use rustc::mir::{Mir, Local};
+use rustc::mir::{UnOp, BinOp, Literal, Lvalue, Operand, ProjectionElem, Rvalue, AggregateKind,
+                 CastKind, StatementKind, TerminatorKind};
+use rustc::dep_graph::DepNode;
 use rustc::middle::const_val::ConstVal;
 use rustc_const_math::{ConstInt, ConstIsize};
 use rustc::ty::{self, TyCtxt, Ty, FnSig};
 use rustc::ty::layout::{self, Layout, Size};
 use rustc::ty::subst::Substs;
-use rustc::hir::intravisit::{self, Visitor, FnKind};
-use rustc::hir::{FnDecl, Block};
+use rustc::hir::intravisit::{self, Visitor, FnKind, NestedVisitorMap};
+use rustc::hir::{FnDecl, BodyId};
 use rustc::hir::def_id::DefId;
 use rustc::traits::Reveal;
 use syntax::ast::{NodeId, IntTy, UintTy, FloatTy};
 use syntax::codemap::Span;
 use std::ffi::CString;
-use std::fs::File;
-use std::io;
-use std::io::Write;
-use std::mem;
-use std::path::Path;
 use std::ptr;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::cell::RefCell;
 use binaryen::*;
 use monomorphize;
 use traits;
@@ -48,8 +45,16 @@ impl WasmTransOptions {
     }
 }
 
-pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
-                             mir_map: &MirMap<'tcx>,
+fn visit_krate<'g, 'tcx>(tcx: TyCtxt<'g, 'tcx, 'tcx>,
+                         module: builder::Module,
+                         entry_fn: Option<NodeId>)
+                         -> builder::Module {
+    let mut context: BinaryenModuleCtxt = BinaryenModuleCtxt::new(tcx, module, entry_fn);
+    tcx.visit_all_item_likes_in_krate(DepNode::Mir, &mut context.as_deep_visitor());
+    context.module
+}
+
+pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                              entry_fn: Option<NodeId>,
                              options: &WasmTransOptions)
                              -> Result<()> {
@@ -60,22 +65,13 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
         unsafe { BinaryenSetAPITracing(true) }
     }
 
-    let ref mut v = BinaryenModuleCtxt {
-        tcx: tcx,
-        mir_map: mir_map,
-        module: builder::Module::new(),
-        entry_fn: entry_fn,
-        fun_types: HashMap::new(),
-        fun_names: HashMap::new(),
-        c_strings: Vec::new(),
-    };
-
-    v.module.auto_drop();
+    let mut module = builder::Module::new();
+    module.auto_drop();
 
     // TODO: allow for a configurable (or auto-detected) memory size
     let mem_size = BinaryenIndex(256);
     unsafe {
-        BinaryenSetMemory(v.module.module,
+        BinaryenSetMemory(module.module,
                           mem_size,
                           mem_size,
                           CString::new("memory").unwrap().as_ptr(),
@@ -85,15 +81,14 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
                           BinaryenIndex(0));
     }
 
-    tcx.map.krate().visit_all_items(v);
-
-    assert!(v.module.is_valid(),
+    let mut module = visit_krate(tcx, module, entry_fn);
+    assert!(module.is_valid(),
             "Internal compiler error: invalid generated module");
 
     // TODO: check which of the Binaryen optimization passes we want aren't on by default here.
     //       eg, removing unused functions and imports, minification, etc
     if options.optimize {
-        v.module.optimize();
+        module.optimize();
     }
 
     unsafe {
@@ -102,54 +97,43 @@ pub fn trans_crate<'a, 'tcx>(tcx: &TyCtxt<'a, 'tcx, 'tcx>,
         }
 
         if options.print && !options.interpret {
-            BinaryenModulePrint(v.module.module);
+            BinaryenModulePrint(module.module);
         }
 
         if options.interpret {
-            BinaryenModuleInterpret(v.module.module);
+            BinaryenModuleInterpret(module.module);
         }
     }
 
     for output in &options.binary_output_path {
-        v.write_to_file(output).expect("error writing wasm file");
+        module.write_to_file(output).expect("error writing wasm file");
     }
 
     Ok(())
 }
 
-struct BinaryenModuleCtxt<'v, 'tcx: 'v> {
-    tcx: &'v TyCtxt<'v, 'tcx, 'tcx>,
-    mir_map: &'v MirMap<'tcx>,
+struct BinaryenModuleCtxt<'b, 'gcx: 'b + 'tcx, 'tcx: 'b> {
+    tcx: TyCtxt<'b, 'gcx, 'tcx>,
     module: builder::Module,
     entry_fn: Option<NodeId>,
-    fun_types: HashMap<ty::FnSig<'tcx>, BinaryenFunctionTypeRef>,
-    fun_names: HashMap<(DefId, ty::FnSig<'tcx>), CString>,
+    fun_types: HashMap<ty::FnSig<'gcx>, BinaryenFunctionTypeRef>,
+    fun_names: HashMap<(DefId, ty::FnSig<'gcx>), CString>,
     c_strings: Vec<CString>,
 }
 
-impl<'v, 'tcx: 'v> BinaryenModuleCtxt<'v, 'tcx> {
-    fn serialize(&self) -> Vec<u8> {
-        unsafe {
-            // TODO: find a way to determine the size of the buffer
-            // first. Right now we just make a 4MB buffer and
-            // truncate.
-            let mut buffer = Vec::with_capacity(1 << 22);
-            let size = BinaryenModuleWrite(self.module.module,
-                                           mem::transmute(buffer.as_mut_ptr()),
-                                           buffer.capacity());
-
-            buffer.set_len(size);
-            buffer.shrink_to_fit();
-
-            buffer
+impl<'c, 'gcx: 'c + 'tcx, 'tcx: 'c> BinaryenModuleCtxt<'c, 'gcx, 'tcx> {
+    fn new(tcx: TyCtxt<'c, 'gcx, 'tcx>,
+           module: builder::Module,
+           entry_fn: Option<NodeId>)
+           -> BinaryenModuleCtxt<'c, 'gcx, 'tcx> {
+        BinaryenModuleCtxt {
+            tcx: tcx,
+            module: module,
+            entry_fn: entry_fn,
+            fun_types: HashMap::new(),
+            fun_names: HashMap::new(),
+            c_strings: Vec::new(),
         }
-    }
-
-    fn write_to_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
-        let mut file = try!(File::create(path));
-        let buffer = self.serialize();
-
-        file.write_all(buffer.as_slice())
     }
 }
 
@@ -157,24 +141,29 @@ impl<'v, 'tcx: 'v> BinaryenModuleCtxt<'v, 'tcx> {
 // TODO: investigate where should the preferred location be
 const STACK_POINTER_ADDRESS: i32 = 0;
 
-impl<'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx> {
-    fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v FnDecl, b: &'v Block, s: Span, id: NodeId) {
-        let did = self.tcx.map.local_def_id(id);
-        let type_scheme = self.tcx.lookup_item_type(did);
-        let generics = &type_scheme.generics;
+impl<'e, 'tcx: 'e, 'h> Visitor<'h> for BinaryenModuleCtxt<'e, 'tcx, 'tcx> {
+    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'h> {
+        NestedVisitorMap::None
+    }
+
+    fn visit_fn(&mut self, fk: FnKind<'h>, fd: &'h FnDecl, b: BodyId, s: Span, id: NodeId) {
+        let did = self.tcx.hir.local_def_id(id);
+
+        let generics = self.tcx.item_generics(did);
 
         // don't translate generic functions yet
         if generics.types.len() + generics.parent_types as usize > 0 {
             return;
         }
 
-        let mir = &self.mir_map.map[&did];
-        let sig = type_scheme.ty.fn_sig().skip_binder();
+        let mir = {
+            self.tcx.mir_map.borrow()[&did]
+        };
 
+        let sig = self.tcx.item_type(did).fn_sig().skip_binder();
         {
             let mut ctxt = BinaryenFnCtxt {
                 tcx: self.tcx,
-                mir_map: self.mir_map,
                 mir: mir,
                 did: did,
                 sig: &sig,
@@ -196,26 +185,56 @@ impl<'v, 'tcx> Visitor<'v> for BinaryenModuleCtxt<'v, 'tcx> {
     }
 }
 
-struct BinaryenFnCtxt<'v, 'tcx: 'v, 'module> {
-    tcx: &'v TyCtxt<'v, 'tcx, 'tcx>,
-    mir_map: &'v MirMap<'tcx>,
-    mir: &'v Mir<'tcx>,
+struct BinaryenFnCtxt<'d, 'gcx: 'd + 'tcx, 'tcx: 'd, 'module> {
+    tcx: TyCtxt<'d, 'gcx, 'tcx>,
+    mir: &'d RefCell<Mir<'tcx>>,
     did: DefId,
-    sig: &'v FnSig<'tcx>,
+    sig: &'d FnSig<'gcx>,
     func: builder::Fn<'module>,
     entry_fn: Option<NodeId>,
-    fun_types: &'v mut HashMap<ty::FnSig<'tcx>, BinaryenFunctionTypeRef>,
-    fun_names: &'v mut HashMap<(DefId, ty::FnSig<'tcx>), CString>,
-    c_strings: &'v mut Vec<CString>,
+    fun_types: &'d mut HashMap<ty::FnSig<'gcx>, BinaryenFunctionTypeRef>,
+    fun_names: &'d mut HashMap<(DefId, ty::FnSig<'gcx>), CString>,
+    c_strings: &'d mut Vec<CString>,
     checked_op_local: Option<BinaryenIndex>,
     var_map: Vec<Option<usize>>,
     temp_map: Vec<Option<usize>>,
     ret_var: Option<usize>,
 }
 
-impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
+impl<'f, 'gcx: 'f + 'tcx, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'gcx, 'tcx, 'module> {
+    fn num_args(&self) -> usize {
+        self.sig.inputs().len()
+    }
+
+    fn get_local_index(&self, i: usize) -> Option<usize> {
+        debug!("fetching local {:?}", i);
+        debug!("  vars: {:?}", self.var_map);
+        debug!("  temps: {:?}", self.temp_map);
+        if i == 0 {
+            debug!("returning retvar");
+            return self.ret_var;
+        }
+        let i = i - 1;
+        if i < self.num_args() {
+            debug!("returning function arg {}", i);
+            return Some(i);
+        }
+        let i = i - self.num_args();
+        if i < self.var_map.len() {
+            debug!("returning {}th local: {:?}", i, self.var_map[i]);
+            return self.var_map[i];
+        }
+        let i = i - self.var_map.len();
+        assert!(i < self.temp_map.len());
+        debug!("returning {}th temp: {:?}", i, self.temp_map[i]);
+        return self.temp_map[i];
+    }
+}
+
+impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
     /// This is the main entry point for MIR->wasm fn translation
     fn trans(&'module mut self) {
+        let mir = self.mir.borrow();
 
         // Maintain a cache of translated monomorphizations and bail
         // if we've already seen this one.
@@ -232,11 +251,11 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         debug!("translating fn {:?}", self.tcx.item_path_str(self.did));
 
         // Translate arg and ret tys to wasm
-        for ty in &self.sig.inputs {
+        for ty in self.sig.inputs() {
             self.func.add_arg(rust_ty_to_builder(ty).unwrap());
         }
         let mut needs_ret_var = false;
-        let ret_ty = self.sig.output;
+        let ret_ty = self.sig.output();
         debug!("ret_ty is {:?}", ret_ty);
         let binaryen_ret = if !ret_ty.is_nil() && !ret_ty.is_never() {
             needs_ret_var = true;
@@ -249,9 +268,12 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         // Create the wasm vars.
         // Params and vars form the list of locals, both sharing the same index space.
 
-        for mir_var in &self.mir.var_decls {
-            debug!("adding local {:?}", mir_var);
-            match rust_ty_to_builder(mir_var.ty) {
+        // TODO(eholk): Use mir.local_decls directly rather than the two iterators.
+        for mir_var in mir.vars_iter() {
+            debug!("adding local {:?}: {:?}",
+                   mir_var,
+                   mir.local_decls[mir_var].ty);
+            match rust_ty_to_builder(mir.local_decls[mir_var].ty) {
                 Some(ty) => {
                     let var = self.func.create_local(ty).index();
                     self.var_map.push(Some(var))
@@ -260,10 +282,11 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             }
         }
 
-        for mir_var in &self.mir.temp_decls {
-            debug!("adding {:?}", mir_var);
-            let ty = rust_ty_to_builder(mir_var.ty).map(|ty| self.func.create_local(ty).index());
-            debug!("type is {:?}", &ty);
+        for mir_var in mir.temps_iter() {
+            debug!("adding temp {:?}", mir_var);
+            let ty = rust_ty_to_builder(mir.local_decls[mir_var].ty)
+                .map(|ty| self.func.create_local(ty).index());
+            debug!("  type is {:?} ~> {:?}", mir.local_decls[mir_var].ty, &ty);
             self.temp_map.push(ty);
         }
 
@@ -284,12 +307,12 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         assert!(self.func.get_var(checked_op_local).ty() == builder::ReprType::Int64);
         self.checked_op_local = Some(checked_op_local.into());
 
-        let locals_count = self.sig.inputs.len() + self.func.num_locals();
+        let locals_count = self.sig.inputs().len() + self.func.num_locals();
         debug!(concat!("{} wasm locals initially found - params: {}, vars: {} ",
                        "(incl. stack pointer helper ${}, relooper helper ${}, ",
                        "checked operation helper ${})"),
                locals_count,
-               self.sig.inputs.len(),
+               self.sig.inputs().len(),
                self.func.num_vars(),
                stack_pointer_local.index(),
                relooper_local.index(),
@@ -303,10 +326,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
         let mut relooper_blocks = Vec::new();
 
-        debug!("{} MIR basic blocks to translate",
-               self.mir.basic_blocks().len());
+        debug!("{} MIR basic blocks to translate", mir.basic_blocks().len());
 
-        for (i, bb) in self.mir.basic_blocks().iter().enumerate() {
+        for (i, bb) in mir.basic_blocks().iter().enumerate() {
             debug!("bb{}: {:#?}", i, bb);
 
             let mut binaryen_stmts = Vec::new();
@@ -321,7 +343,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 }
             }
 
-            let mut block_kind = BinaryenBlockKind::Default;
+            let block_kind = BinaryenBlockKind::Default;
 
             // Some features of MIR terminators tranlate to wasm
             // expressions, some translate to relooper edges. These
@@ -351,52 +373,54 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     let expr = if ret_ty.is_nil() {
                         BinaryenExpressionRef(ptr::null_mut())
                     } else {
-                        self.trans_operand(&Operand::Consume(Lvalue::ReturnPointer))
+                        // Local 0 is guaranteed to be return pointer
+                        self.trans_operand(&Operand::Consume(Lvalue::Local(Local::new(0))))
                     };
                     let expr = unsafe { BinaryenReturn(self.func.module.module, expr) };
                     binaryen_stmts.push(expr);
                 }
-                TerminatorKind::Switch { ref discr, .. } => {
-                    let adt = self.trans_lval(discr).unwrap();
-                    let adt_ty = discr.ty(self.mir, *self.tcx).to_ty(*self.tcx);
-
-                    if adt.offset.is_some() {
-                        panic!("unimplemented Switch with offset");
-                    }
-
-                    let adt_layout = self.type_layout(adt_ty);
-                    let discr_val = match *adt_layout {
-                        Layout::General { discr, .. } => {
-                            let discr_size = discr.size().bytes() as u32;
-                            debug!("emitting GetLocal({}) + Load for ADT Switch condition",
-                                   adt.index.0);
-                            unsafe {
-                                let ptr = BinaryenGetLocal(self.func.module.module,
-                                                           adt.index,
-                                                           BinaryenInt32());
-                                BinaryenLoad(self.func.module.module,
-                                             discr_size,
-                                             0,
-                                             0,
-                                             0,
-                                             BinaryenInt32(),
-                                             ptr)
-                            }
-                        }
-                        Layout::CEnum { .. } => {
-                            debug!("emitting GetLocal({}) for CEnum Switch condition",
-                                   adt.index.0);
-                            unsafe {
-                                BinaryenGetLocal(self.func.module.module,
-                                                 adt.index,
-                                                 BinaryenInt32())
-                            }
-                        }
-                        _ => panic!("unimplemented discrimant value for Layout {:?}", adt_layout),
-                    };
-
-                    block_kind = BinaryenBlockKind::Switch(discr_val);
-                }
+                // TerminatorKind::Switch { ref discr, .. } => {
+                //     let adt = self.trans_lval(discr).unwrap();
+                //     let adt_ty = discr.ty(&*mir, self.tcx).to_ty(self.tcx);
+                //
+                //     if adt.offset.is_some() {
+                //         panic!("unimplemented Switch with offset");
+                //     }
+                //
+                //     let adt_layout = self.type_layout(adt_ty);
+                //     let discr_val = match *adt_layout {
+                //         Layout::General { discr, .. } => {
+                //             let discr_size = discr.size().bytes() as u32;
+                //             debug!("emitting GetLocal({}) + Load for ADT Switch condition",
+                //                    adt.index.0);
+                //             unsafe {
+                //                 let ptr = BinaryenGetLocal(self.func.module.module,
+                //                                            adt.index,
+                //                                            BinaryenInt32());
+                //                 BinaryenLoad(self.func.module.module,
+                //                              discr_size,
+                //                              0,
+                //                              0,
+                //                              0,
+                //                              BinaryenInt32(),
+                //                              ptr)
+                //             }
+                //         }
+                //         Layout::CEnum { .. } => {
+                //             debug!("emitting GetLocal({}) for CEnum Switch condition",
+                //                    adt.index.0);
+                //             unsafe {
+                //                 BinaryenGetLocal(self.func.module.module,
+                //                                  adt.index,
+                //                                  BinaryenInt32())
+                //             }
+                //         }
+                //         _ => panic!("unimplemented discrimant value for Layout {:?}",
+                //                     adt_layout),
+                //     };
+                //
+                //     block_kind = BinaryenBlockKind::Switch(discr_val);
+                // }
                 TerminatorKind::Call { ref func, ref args, ref destination, .. } => unsafe {
                     // NOTE: plan for the calling convention: i32/i64 f32/f64 are to be passed
                     // using the wasm stack and function parameters. For the other types, the
@@ -435,7 +459,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     binaryen_stmts.push(b_call);
                                 } else {
                                     let dest = self.trans_lval(lvalue).unwrap();
-                                    let dest_ty = lvalue.ty(self.mir, *self.tcx).to_ty(*self.tcx);
+                                    let dest_ty = lvalue.ty(&*mir, self.tcx).to_ty(self.tcx);
                                     let dest_layout = self.type_layout(dest_ty);
 
                                     match *dest_layout {
@@ -549,6 +573,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                 debug!("emitting Call to fn {:?}", func);
                                 binaryen_stmts.push(b_call);
                                 if is_never {
+                                    debug!("{:?} is !, adding unreachable", func);
                                     let unreachable = BinaryenUnreachable(self.func.module.module);
                                     binaryen_stmts.push(unreachable);
                                 }
@@ -582,7 +607,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         }
 
         // Create the relooper edges from the bb terminators
-        for (i, bb) in self.mir.basic_blocks().iter().enumerate() {
+        for (i, bb) in mir.basic_blocks().iter().enumerate() {
             match bb.terminator().kind {
                 TerminatorKind::Goto { ref target } => {
                     debug!("emitting Branch for Goto, from bb{} to bb{}",
@@ -595,81 +620,83 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                           BinaryenExpressionRef(ptr::null_mut()));
                     }
                 }
-                TerminatorKind::If { ref cond, ref targets } => {
-                    debug!("emitting Branches for If, from bb{} to bb{} and bb{}",
-                           i,
-                           targets.0.index(),
-                           targets.1.index());
-
-                    let cond = self.trans_operand(cond);
-
-                    unsafe {
-                        RelooperAddBranch(relooper_blocks[i],
-                                          relooper_blocks[targets.0.index()],
-                                          cond,
-                                          BinaryenExpressionRef(ptr::null_mut()));
-                        RelooperAddBranch(relooper_blocks[i],
-                                          relooper_blocks[targets.1.index()],
-                                          BinaryenExpressionRef(ptr::null_mut()),
-                                          BinaryenExpressionRef(ptr::null_mut()));
-                    }
-                }
-                TerminatorKind::Switch { ref adt_def, ref targets, .. } => {
-                    // We're required to have only unique (from, to) edges, while we have
-                    // a variant to target mapping, where multiple variants can branch to
-                    // the same target block. So group them by target block index.
-                    let target_per_variant = targets.iter().map(|&t| t.index());
-                    let mut variants_per_target = HashMap::new();
-                    for (variant, target) in target_per_variant.enumerate() {
-                        match variants_per_target.entry(target) {
-                            Entry::Vacant(entry) => {
-                                entry.insert(vec![variant]);
-                            }
-                            Entry::Occupied(mut entry) => {
-                                entry.get_mut().push(variant);
-                            }
-                        }
-                    }
-
-                    for (target, variants) in variants_per_target {
-                        debug!("emitting Switch branch from bb{} to bb{}, for Enum '{:?}' \
-                                variants {:?}",
-                               i,
-                               target,
-                               adt_def,
-                               variants);
-
-                        // TODO: is it necessary to handle cases where the discriminant is not a
-                        // valid u32 ? (doubtful)
-                        let labels = variants.iter()
-                            .map(|&v| {
-                                let discr_val =
-                                    adt_def.variants[v].disr_val.to_u64_unchecked() as u32;
-                                BinaryenIndex(discr_val)
-                            })
-                            .collect::<Vec<_>>();
-
-                        // wasm also requires to have a "default" branch, even though this is less
-                        // useful to us as we have a target for every variant.
-                        // TODO: figure out the best way to handle this, maybe add an unreachable
-                        // block to trigger an error. In the meantime, consider the edge to the
-                        // first variant as the default branch. And apparently the LLVM backend
-                        // emits a random branch as the default one.
-                        let (labels_ptr, labels_count) = if variants.contains(&0) {
-                            (ptr::null(), 0)
-                        } else {
-                            (labels.as_ptr(), labels.len())
-                        };
-
-                        unsafe {
-                            RelooperAddBranchForSwitch(relooper_blocks[i],
-                                                       relooper_blocks[target],
-                                                       labels_ptr,
-                                                       BinaryenIndex(labels_count as _),
-                                                       BinaryenExpressionRef(ptr::null_mut()));
-                        }
-                    }
-                }
+                // TerminatorKind::If { ref cond, ref targets } => {
+                //     debug!("emitting Branches for If, from bb{} to bb{} and bb{}",
+                //            i,
+                //            targets.0.index(),
+                //            targets.1.index());
+                //
+                //     let cond = self.trans_operand(cond);
+                //
+                //     unsafe {
+                //         RelooperAddBranch(relooper_blocks[i],
+                //                           relooper_blocks[targets.0.index()],
+                //                           cond,
+                //                           BinaryenExpressionRef(ptr::null_mut()));
+                //         RelooperAddBranch(relooper_blocks[i],
+                //                           relooper_blocks[targets.1.index()],
+                //                           BinaryenExpressionRef(ptr::null_mut()),
+                //                           BinaryenExpressionRef(ptr::null_mut()));
+                //     }
+                // }
+                // TerminatorKind::Switch { ref adt_def, ref targets, .. } => {
+                //     // We're required to have only unique (from, to) edges, while we have
+                //     // a variant to target mapping, where multiple variants can branch to
+                //     // the same target block. So group them by target block index.
+                //     let target_per_variant = targets.iter().map(|&t| t.index());
+                //     let mut variants_per_target = HashMap::new();
+                //     for (variant, target) in target_per_variant.enumerate() {
+                //         match variants_per_target.entry(target) {
+                //             Entry::Vacant(entry) => {
+                //                 entry.insert(vec![variant]);
+                //             }
+                //             Entry::Occupied(mut entry) => {
+                //                 entry.get_mut().push(variant);
+                //             }
+                //         }
+                //     }
+                //
+                //     for (target, variants) in variants_per_target {
+                //         debug!("emitting Switch branch from bb{} to bb{}, for Enum '{:?}' \
+                //                 variants {:?}",
+                //                i,
+                //                target,
+                //                adt_def,
+                //                variants);
+                //
+                //         // TODO: is it necessary to handle cases where the discriminant is not a
+                //         // valid u32 ? (doubtful)
+                //         let labels = variants.iter()
+                //             .map(|&v| {
+                //                 let discr_val = adt_def.variants[v]
+                //                     .disr_val
+                //                     .to_u32()
+                //                     .expect("unimplemented: enum discriminant size > u32 ");
+                //                 BinaryenIndex(discr_val)
+                //             })
+                //             .collect::<Vec<_>>();
+                //
+                //         // wasm also requires to have a "default" branch, even though this is
+                //         // less useful to us as we have a target for every variant.
+                //         // TODO: figure out the best way to handle this, maybe add an
+                //         // unreachable block to trigger an error. In the meantime, consider the
+                //         // edge to the first variant as the default branch. And apparently the
+                //         // LLVM backend emits a random branch as the default one.
+                //         let (labels_ptr, labels_count) = if variants.contains(&0) {
+                //             (ptr::null(), 0)
+                //         } else {
+                //             (labels.as_ptr(), labels.len())
+                //         };
+                //
+                //         unsafe {
+                //             RelooperAddBranchForSwitch(relooper_blocks[i],
+                //                                        relooper_blocks[target],
+                //                                        labels_ptr,
+                //                                        BinaryenIndex(labels_count as _),
+                //                                        BinaryenExpressionRef(ptr::null_mut()));
+                //         }
+                //     }
+                // }
                 TerminatorKind::Return => {
                     // handled during bb creation
                 }
@@ -710,14 +737,13 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         if !self.fun_types.contains_key(self.sig) {
             let name = format!("rustfn-{}-{}", self.did.krate, self.did.index.as_u32());
             let name = CString::new(name).expect("");
-            let name_ptr = name.as_ptr();
             self.c_strings.push(name);
             let name = &self.c_strings[self.c_strings.len() - 1];
             let ty = self.func.create_sig_type(name, binaryen_ret);
             self.fun_types.insert(self.sig.clone(), ty);
         }
 
-        let nid = self.tcx.map.as_local_node_id(self.did).expect("");
+        let nid = self.tcx.hir.as_local_node_id(self.did).expect("");
 
         unsafe {
             if Some(self.did) == self.tcx.lang_items.panic_fn() {
@@ -768,7 +794,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             }
 
             if self.entry_fn == Some(nid) {
-                let is_start = self.mir.arg_decls.len() == 2;
+                let is_start = mir.arg_count == 2;
                 let entry_fn_name = if is_start { "start" } else { "main" };
                 let wasm_start = self.generate_runtime_start(&entry_fn_name);
                 debug!("emitting wasm Start fn into entry_fn {:?}",
@@ -785,6 +811,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                         lvalue: &Lvalue<'tcx>,
                         rvalue: &Rvalue<'tcx>,
                         statements: &mut Vec<BinaryenExpressionRef>) {
+        let mir = self.mir.borrow();
+
         let dest = match self.trans_lval(lvalue) {
             Some(dest) => dest,
             None => {
@@ -796,7 +824,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 return;
             }
         };
-        let dest_ty = lvalue.ty(self.mir, *self.tcx).to_ty(*self.tcx);
+        let dest_ty = lvalue.ty(&*mir, self.tcx).to_ty(self.tcx);
 
         let dest_layout = self.type_layout(dest_ty);
 
@@ -1053,7 +1081,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                 statements.push(allocation);
 
                                 let offsets = ::std::iter::once(0)
-                                    .chain(variant.offset_after_field.iter().map(|s| s.bytes()));
+                                    .chain(variant.offsets.iter().map(|s| s.bytes()));
                                 debug!("emitting Stores for struct '{:?}' fields, values: {:?}",
                                        adt_def,
                                        operands);
@@ -1062,8 +1090,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
 
                             Layout::General { discr, ref variants, .. } => {
                                 if let AggregateKind::Adt(ref adt_def, variant, _, _) = *kind {
-                                    let discr_val =
-                                        adt_def.variants[variant].disr_val.to_u32().unwrap();
+                                    let discr_val = adt_def.variants[variant].disr_val as u32;
                                     let discr_size = discr.size().bytes() as u32;
 
                                     debug!("allocating Enum '{:?}' in linear memory to \
@@ -1097,7 +1124,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                            adt_def,
                                            operands);
                                     let offsets = variants[variant]
-                                        .offset_after_field
+                                        .offsets
                                         .iter()
                                         .map(|s| s.bytes());
                                     self.emit_assign_fields(offsets, operands, statements);
@@ -1117,7 +1144,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     // TODO: handle signed vs unsigned here as well, or just in the
                                     // BinOps ?
                                     let discr_val = adt_def.variants[variant].disr_val;
-                                    let discr_val = discr_val.to_u64_unchecked() as i32;
+                                    let discr_val = discr_val as i32;
 
                                     // set enum discr
                                     unsafe {
@@ -1166,10 +1193,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     let allocation = self.emit_alloca(dest.index, dest_size);
                                     statements.push(allocation);
 
-                                    let offsets = ::std::iter::once(0)
-                                        .chain(variant.offset_after_field
-                                            .iter()
-                                            .map(|s| s.bytes()));
+                                    let offsets = ::std::iter::once(0).chain(variant.offsets
+                                        .iter()
+                                        .map(|s| s.bytes()));
                                     debug!("emitting Stores for tuple fields, values: {:?}",
                                            operands);
                                     self.emit_assign_fields(offsets, operands, statements);
@@ -1195,7 +1221,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 match *kind {
                     CastKind::Misc => {
                         let src = self.trans_operand(operand);
-                        let src_ty = operand.ty(self.mir, *self.tcx);
+                        let src_ty = operand.ty(&*mir, self.tcx);
                         let src_layout = self.type_layout(src_ty);
 
                         // TODO: handle more of the casts (miri doesn't really handle every Misc
@@ -1289,6 +1315,9 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         }
     }
 
+    // TODO this function changed from being passed offsets-after-field to offsets-of-field...
+    // but I suspect it still does the right thing - emit a store for every field.
+    // Did it miss the first field and emit after the last field of the struct before?
     fn emit_assign_fields<I>(&mut self,
                              offsets: I,
                              operands: &[Operand<'tcx>],
@@ -1299,7 +1328,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
             let read_sp = self.emit_read_sp();
 
             for (offset, operand) in offsets.into_iter().zip(operands) {
-                // let operand_ty = self.mir.operand_ty(*self.tcx, operand);
+                // let operand_ty = mir.operand_ty(*self.tcx, operand);
                 // TODO: match on the operand_ty to know how many bytes to store, not just i32s
                 let src = self.trans_operand(operand);
                 let write_field = BinaryenStore(self.func.module.module,
@@ -1315,25 +1344,14 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     }
 
     fn trans_lval(&mut self, lvalue: &Lvalue<'tcx>) -> Option<BinaryenLvalue> {
+        let mir = self.mir.borrow();
+
+        debug!("translating lval: {:?}", lvalue);
+
         let i = match *lvalue {
-            Lvalue::Arg(i) => i.index() as u32,
-            Lvalue::Var(i) => {
-                match self.var_map[i.index()] {
+            Lvalue::Local(i) => {
+                match self.get_local_index(i.index()) {
                     Some(i) => i as u32,
-                    None => return None,
-                }
-            }
-            Lvalue::Temp(i) => {
-                match self.temp_map[i.index()] {
-                    Some(i) => i as u32,
-                    None => return None,
-                }
-            }
-            Lvalue::ReturnPointer => {
-                debug!("Translating ret_var lval. self.ret_var = {:?}",
-                       self.ret_var);
-                match self.ret_var {
-                    Some(x) => x.index() as u32,
                     None => return None,
                 }
             }
@@ -1342,7 +1360,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                     Some(base) => base,
                     None => return None,
                 };
-                let base_ty = projection.base.ty(self.mir, *self.tcx).to_ty(*self.tcx);
+                let base_ty = projection.base.ty(&*mir, self.tcx).to_ty(self.tcx);
                 let base_layout = self.type_layout(base_ty);
 
                 match projection.elem {
@@ -1365,7 +1383,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                             _ => panic!("unimplemented Field Projection: {:?}", projection),
                         };
 
-                        let offset = variant.field_offset(field.index()).bytes() as u32;
+                        let offset = variant.offsets[field.index()].bytes() as u32;
                         return Some(BinaryenLvalue::new(base.index,
                                                         base.offset,
                                                         LvalueExtra::None)
@@ -1395,6 +1413,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
     }
 
     fn trans_operand(&mut self, operand: &Operand<'tcx>) -> BinaryenExpressionRef {
+        let mir = self.mir.borrow();
+
         match *operand {
             Operand::Consume(ref lvalue) => {
                 let binaryen_lvalue = match self.trans_lval(lvalue) {
@@ -1404,8 +1424,8 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                         return unsafe { BinaryenUnreachable(self.func.module.module) };
                     }
                 };
-                let lval_ty = lvalue.ty(self.mir, *self.tcx);
-                let t = lval_ty.to_ty(*self.tcx);
+                let lval_ty = lvalue.ty(&*mir, self.tcx);
+                let t = lval_ty.to_ty(self.tcx);
                 let t = rust_ty_to_binaryen(t);
 
                 unsafe {
@@ -1464,43 +1484,82 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
         }
     }
 
-    #[inline]
-    fn type_size(&self, ty: Ty<'tcx>) -> usize {
-        let substs = Substs::empty(*self.tcx);
-        self.type_size_with_substs(ty, substs)
-    }
 
-    // Imported from miri
-    #[inline]
-    fn type_size_with_substs(&self, ty: Ty<'tcx>, substs: &'tcx Substs<'tcx>) -> usize {
-        self.type_layout_with_substs(ty, substs).size(&self.tcx.data_layout).bytes() as usize
-    }
+    fn trans_fn(&mut self,
+                mut fn_did: DefId,
+                substs: &Substs<'tcx>,
+                sig: FnSig<'tcx>)
+                -> (FnSig<'tcx>, DefId) {
+        let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
 
-    #[inline]
-    fn type_layout(&self, ty: Ty<'tcx>) -> &'tcx Layout {
-        let substs = Substs::empty(*self.tcx);
-        self.type_layout_with_substs(ty, substs)
-    }
+        let (substs, sig) = if !is_trait_method {
+            (substs, &sig)
+        } else {
+            let (resolved_def_id, resolved_substs) =
+                traits::resolve_trait_method(self.tcx, fn_did, substs);
+            let ty = self.tcx.item_type(resolved_def_id);
+            // TODO: investigate rustc trans use of
+            // liberate_bound_regions or similar here
+            let sig = ty.fn_sig().skip_binder();
 
-    // Imported from miri and slightly modified to adapt to our monomorphize api
-    fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &'tcx Substs<'tcx>) -> &'tcx Layout {
-        // TODO(solson): Is this inefficient? Needs investigation.
-        let ty = monomorphize::apply_ty_substs(self.tcx, substs, ty);
+            fn_did = resolved_def_id;
+            (resolved_substs, sig)
+        };
 
-        self.tcx.infer_ctxt(None, None, Reveal::All).enter(|infcx| {
-            // TODO(solson): Report this error properly.
-            ty.layout(&infcx).unwrap()
-        })
+        let mir = {
+            self.tcx.mir_map.borrow()[&fn_did]
+        };
+
+        let fn_sig = monomorphize::apply_substs(self.tcx, substs, sig);
+
+        // mark the fn defid seen to not have translated twice
+        // TODO: verify this more thoroughly, works for our limited
+        // tests right now
+        if sig != &fn_sig {
+            let fn_name = sanitize_symbol(&self.tcx
+                .item_path_str(fn_did));
+            let fn_name = CString::new(fn_name).expect("");
+            self.fun_names.insert((fn_did, sig.clone()), fn_name);
+        }
+
+        // This simple check is also done in trans() but doing it here
+        // helps have a clearer debug log
+        if !self.fun_names.contains_key(&(fn_did, fn_sig.clone())) {
+            let mut ctxt = BinaryenFnCtxt {
+                tcx: self.tcx,
+                mir: mir,
+                did: fn_did,
+                sig: &fn_sig,
+                func: self.func.module.create_func(),
+                entry_fn: self.entry_fn,
+                fun_types: &mut self.fun_types,
+                fun_names: &mut self.fun_names,
+                c_strings: &mut self.c_strings,
+                checked_op_local: None,
+                var_map: Vec::new(),
+                temp_map: Vec::new(),
+                ret_var: None,
+            };
+
+            debug!("translating monomorphized fn {:?}",
+                   self.tcx.item_path_str(fn_did));
+            ctxt.trans();
+            debug!("done translating monomorphized {:?}, continuing translation of fn {:?}",
+                   self.tcx.item_path_str(fn_did),
+                   self.tcx.item_path_str(self.did));
+        }
+
+        return (fn_sig, fn_did);
     }
 
     fn trans_fn_name_direct(&mut self,
                             operand: &Operand<'tcx>)
                             -> Option<(*const c_char, BinaryenType, BinaryenCallKind, bool)> {
-        match *operand {
-            Operand::Constant(ref c) => {
+        match operand {
+            &Operand::Constant(ref c) => {
                 match c.literal {
-                    Literal::Item { def_id, ref substs } => {
-                        let ty = self.tcx.lookup_item_type(def_id).ty;
+                    Literal::Item { def_id, substs } => {
+                        let ty = self.tcx.item_type(def_id);
                         if ty.is_fn() {
                             assert!(def_id.is_local());
                             let sig = ty.fn_sig().skip_binder();
@@ -1519,75 +1578,20 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                                     self.import_wasm_extern(fn_did, sig);
                                 }
                                 _ => {
-                                    let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
-
-                                    let (substs, sig) = if !is_trait_method {
-                                        (*substs, sig)
-                                    } else {
-                                        let (resolved_def_id, resolved_substs) =
-                                            traits::resolve_trait_method(self.tcx, fn_did, substs);
-                                        let ty = self.tcx.lookup_item_type(resolved_def_id).ty;
-                                        // TODO: investigate rustc trans use of
-                                        // liberate_bound_regions or similar here
-                                        let sig = ty.fn_sig().skip_binder();
-
-                                        fn_did = resolved_def_id;
-                                        (resolved_substs, sig)
-                                    };
-
-                                    let mir = &self.mir_map.map[&fn_did];
-
-                                    fn_sig =
-                                        monomorphize::apply_param_substs(self.tcx, substs, sig);
-
-                                    // mark the fn defid seen to not have translated twice
-                                    // TODO: verify this more thoroughly, works for our limited
-                                    // tests right now
-                                    if *sig != fn_sig {
-                                        let fn_name = sanitize_symbol(&self.tcx
-                                            .item_path_str(fn_did));
-                                        let fn_name = CString::new(fn_name).expect("");
-                                        self.fun_names.insert((fn_did, sig.clone()), fn_name);
-                                    }
-
-                                    // This simple check is also done in trans() but doing it here
-                                    // helps have a clearer debug log
-                                    if !self.fun_names.contains_key(&(fn_did, fn_sig.clone())) {
-                                        let mut ctxt = BinaryenFnCtxt {
-                                            tcx: self.tcx,
-                                            mir_map: self.mir_map,
-                                            mir: mir,
-                                            did: fn_did,
-                                            sig: &fn_sig,
-                                            func: self.func.module.create_func(),
-                                            entry_fn: self.entry_fn,
-                                            fun_types: &mut self.fun_types,
-                                            fun_names: &mut self.fun_names,
-                                            c_strings: &mut self.c_strings,
-                                            checked_op_local: None,
-                                            var_map: Vec::new(),
-                                            temp_map: Vec::new(),
-                                            ret_var: None,
-                                        };
-
-                                        debug!("translating monomorphized fn {:?}",
-                                               self.tcx.item_path_str(fn_did));
-                                        ctxt.trans();
-                                        debug!("done translating monomorphized {:?}, continuing \
-                                                translation of fn {:?}",
-                                               self.tcx.item_path_str(fn_did),
-                                               self.tcx.item_path_str(self.did));
-                                    }
+                                    let (fn_sig_, fn_did_) =
+                                        self.trans_fn(fn_did, substs, sig.clone());
+                                    fn_sig = fn_sig_;
+                                    fn_did = fn_did_;
                                 }
                             }
 
-                            let ret_ty = if !fn_sig.output.is_nil() {
-                                rust_ty_to_binaryen(fn_sig.output)
+                            let ret_ty = if !fn_sig.output().is_nil() {
+                                rust_ty_to_binaryen(fn_sig.output())
                             } else {
                                 BinaryenNone()
                             };
 
-                            let is_never = fn_sig.output.is_never() || fn_name == "panic";
+                            let is_never = fn_sig.output().is_never() || fn_name == "panic";
                             Some((self.fun_names[&(fn_did, fn_sig)].as_ptr(),
                                   ret_ty,
                                   call_kind,
@@ -1658,7 +1662,7 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                 entry_fn_call = BinaryenDrop(self.func.module.module, call);
             } else {
                 assert!(entry_fn == "main");
-                assert!(self.sig.output.is_nil());
+                assert!(self.sig.output().is_nil());
                 entry_fn_call = BinaryenCall(self.func.module.module,
                                              entry_fn_name.as_ptr(),
                                              ptr::null(),
@@ -1718,6 +1722,36 @@ impl<'v, 'tcx: 'v, 'module: 'v> BinaryenFnCtxt<'v, 'tcx, 'module> {
                               print_i32_ty);
         }
     }
+
+    // Imported from miri and slightly modified to adapt to our monomorphize api
+    fn type_layout_with_substs(&self, ty: Ty<'tcx>, substs: &Substs<'tcx>) -> &'tcx Layout {
+        // TODO(solson): Is this inefficient? Needs investigation.
+        let ty = monomorphize::apply_substs(self.tcx, substs, &ty);
+
+        self.tcx.infer_ctxt((), Reveal::All).enter(|infcx| {
+            // TODO(solson): Report this error properly.
+            ty.layout(&infcx).unwrap()
+        })
+    }
+
+    #[inline]
+    fn type_size(&self, ty: Ty<'tcx>) -> usize {
+        let substs = Substs::empty();
+        self.type_size_with_substs(ty, substs)
+    }
+
+
+    // Imported from miri
+    #[inline]
+    fn type_size_with_substs(&self, ty: Ty<'tcx>, substs: &'tcx Substs<'tcx>) -> usize {
+        self.type_layout_with_substs(ty, substs).size(&self.tcx.data_layout).bytes() as usize
+    }
+
+    #[inline]
+    fn type_layout(&self, ty: Ty<'tcx>) -> &'tcx Layout {
+        let substs = Substs::empty();
+        self.type_layout_with_substs(ty, substs)
+    }
 }
 
 fn rust_ty_to_binaryen<'tcx>(t: Ty<'tcx>) -> BinaryenType {
@@ -1754,11 +1788,9 @@ fn rust_ty_to_builder<'tcx>(t: Ty<'tcx>) -> builder::Type {
 
 fn sanitize_symbol(s: &str) -> String {
     s.chars()
-        .map(|c| {
-            match c {
-                '<' | '>' | ' ' | '(' | ')' => '_',
-                _ => c,
-            }
+        .map(|c| match c {
+            '<' | '>' | ' ' | '(' | ')' => '_',
+            _ => c,
         })
         .collect()
 }
@@ -1821,20 +1853,7 @@ impl IntegerExt for layout::Integer {
             I16 => Size::from_bits(16),
             I32 => Size::from_bits(32),
             I64 => Size::from_bits(64),
-        }
-    }
-}
-
-trait StructExt {
-    fn field_offset(&self, index: usize) -> Size;
-}
-
-impl StructExt for layout::Struct {
-    fn field_offset(&self, index: usize) -> Size {
-        if index == 0 {
-            Size::from_bytes(0)
-        } else {
-            self.offset_after_field[index - 1]
+            I128 => panic!("i128 is not yet supported"),
         }
     }
 }

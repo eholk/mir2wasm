@@ -8,3 +8,5 @@ tex/*/out
 /.wasm-install-ver
 /.wasm-install.tbz2
 *.bk
+*.wasm
+*.wast
