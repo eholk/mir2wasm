@@ -639,20 +639,24 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
                     let discr = self.trans_operand(discr);
 
+                    assert!(values.len() > 0);
+
                     for j in 0..values.len() - 1 {
                         let value = values[j].to_u32().expect("invalid switch index").into();
                         let target = targets[j].index();
                         let value_ptr = &value;
                         unsafe {
-                            RelooperAddBranchForSwitch(from, relooper_blocks[target], value_ptr, 1u32.into(), discr);
+                            RelooperAddBranchForSwitch(from, relooper_blocks[target], value_ptr,
+                                1u32.into(), BinaryenExpressionRef(ptr::null_mut()));
                         }
                     }
 
                     // Add the otherwise branch
                     unsafe {
-                        RelooperAddBranch(from,
+                        RelooperAddBranchForSwitch(from,
                                           relooper_blocks[targets[targets.len() - 1].index()],
-                                          BinaryenExpressionRef(ptr::null_mut()),
+                                          ptr::null_mut(),
+                                          0u32.into(),
                                           BinaryenExpressionRef(ptr::null_mut()));
                     }
                 }
@@ -660,7 +664,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                     // handled during bb creation
                 }
                 TerminatorKind::Assert { ref target, ref cond, .. } => {
-                    debug!("emitting Branch for Goto, from bb{} to bb{}",
+                    debug!("emitting Branch for Assert, from bb{} to bb{}",
                            i,
                            target.index());
                     let cond = self.trans_operand(cond);
@@ -669,6 +673,13 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                           relooper_blocks[target.index()],
                                           cond,
                                           BinaryenExpressionRef(ptr::null_mut()));
+                      // Add an unreachable for when the Assert fails.
+                      //
+                      // TODO(eholk): panic instead, with a helpful error message.
+                      let panic = RelooperAddBlock(relooper, BinaryenUnreachable(self.func.module.module));
+                      RelooperAddBranch(relooper_blocks[i],
+                          panic, BinaryenExpressionRef(ptr::null_mut()),
+                          BinaryenExpressionRef(ptr::null_mut()));
                     }
                 }
                 TerminatorKind::Call { ref destination, ref cleanup, .. } => {
@@ -1548,6 +1559,9 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                             // TODO(eholk): find out the correct way to recognize extern fns
                             if self.tcx.maps.mir.borrow().get(&fn_did).is_none() {
                                 debug!("no mir map present, assuming fn is extern.");
+
+                                assert!(fn_name != "wasm::::print_i32");
+
                                 fn_sig = sig.clone();
                                 call_kind = BinaryenCallKind::Import;
                                 self.import_wasm_extern(fn_did, sig);
@@ -1678,6 +1692,46 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
             return;
         }
 
+        let full_name = self.tcx.item_path_str(did);
+        debug!("adding extern for {:?}", full_name);
+
+        // find the link attribute
+        let parent_did = self.tcx.parent_def_id(did).expect("trying to import function with no parent");
+        if self.tcx.has_attr(parent_did, "link") {
+
+        let mut module_name = None;
+        for attr in self.tcx.get_attrs(parent_did).iter().filter(|a| a.check_name("link")) {
+            let items = match attr.meta_item_list() {
+                Some(item) => item,
+                None => continue,
+            };
+
+            let name = items.iter().find(|n| n.check_name("name")).and_then(|a| a.value_str()).expect("missing link name");
+            module_name = Some(name);
+        }
+        let module_name = &*module_name.expect("no module name found").as_str();
+
+        let fn_name = &*self.tcx.item_name(did).as_str();
+
+        debug!("importing {:?}::{:?}", module_name, fn_name);
+
+        let full_name = CString::new(full_name).expect("error generating full name");
+        let module_name = CString::new(module_name).expect("error generating module name");
+        let fn_name = CString::new(fn_name).expect("error generating function name");
+        unsafe {
+            // TODO(eholk): support proper function types.
+            let ty = BinaryenAddFunctionType(self.func.module.module,
+            full_name.as_ptr(), BinaryenNone(), ptr::null_mut(), 0u32.into());
+            BinaryenAddImport(self.func.module.module,
+              full_name.as_ptr(), module_name.as_ptr(), fn_name.as_ptr(), ty);
+        }
+        self.c_strings.push(fn_name);
+        self.c_strings.push(full_name.clone());
+        self.fun_names.insert((did, sig.clone()), full_name);
+
+}else{
+        assert!(full_name == "wasm::::print_i32");
+
         // import print i32
         let print_i32_name = CString::new("print_i32").expect("");
         let print_i32 = print_i32_name.as_ptr();
@@ -1705,6 +1759,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                               print_fn,
                               print_i32_ty);
         }
+    }
     }
 
     // Imported from miri and slightly modified to adapt to our monomorphize api
