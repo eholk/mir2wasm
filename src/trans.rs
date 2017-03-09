@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 use binaryen::*;
 use monomorphize;
+use binops::binaryen_op_for;
 use traits;
 use rustc_data_structures::indexed_vec::Idx;
 
@@ -846,30 +847,14 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
             }
 
             Rvalue::BinaryOp(ref op, ref left, ref right) => {
+                let src_ty = left.ty(&*self.mir.borrow(), self.tcx);
                 let left = self.trans_operand(left);
                 let right = self.trans_operand(right);
 
                 unsafe {
-                    // TODO: match on dest_ty.sty to implement binary ops for other types than just
-                    // i32s
                     // TODO: check if the dest_layout is signed or not (CEnum, etc)
                     // TODO: comparisons are signed only for now, so implement unsigned ones
-                    let op = match *op {
-                        BinOp::Add => BinaryenAddInt32(),
-                        BinOp::Sub => BinaryenSubInt32(),
-                        BinOp::Mul => BinaryenMulInt32(),
-                        BinOp::Div => BinaryenDivSInt32(),
-                        BinOp::BitAnd => BinaryenAndInt32(),
-                        BinOp::BitOr => BinaryenOrInt32(),
-                        BinOp::BitXor => BinaryenXorInt32(),
-                        BinOp::Eq => BinaryenEqInt32(),
-                        BinOp::Ne => BinaryenNeInt32(),
-                        BinOp::Lt => BinaryenLtSInt32(),
-                        BinOp::Le => BinaryenLeSInt32(),
-                        BinOp::Gt => BinaryenGtSInt32(),
-                        BinOp::Ge => BinaryenGeSInt32(),
-                        _ => panic!("unimplemented BinOp: {:?}", op),
-                    };
+                    let op = binaryen_op_for(*op, src_ty);
 
                     let op = BinaryenBinary(self.func.module.module, op, left, right);
                     let statement = match dest.offset {
