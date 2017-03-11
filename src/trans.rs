@@ -157,10 +157,11 @@ impl<'e, 'tcx: 'e, 'h> Visitor<'h> for BinaryenModuleCtxt<'e, 'tcx, 'tcx> {
         }
 
         let mir = {
-            self.tcx.mir_map.borrow()[&did]
+            self.tcx.maps.mir.borrow()[&did]
         };
 
-        let sig = self.tcx.item_type(did).fn_sig().skip_binder();
+        let sig = self.tcx.item_type(did).fn_sig();
+        let sig = sig.skip_binder();
         {
             let mut ctxt = BinaryenFnCtxt {
                 tcx: self.tcx,
@@ -669,7 +670,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 //         let labels = variants.iter()
                 //             .map(|&v| {
                 //                 let discr_val = adt_def.variants[v]
-                //                     .disr_val
+                //                     .discr
                 //                     .to_u32()
                 //                     .expect("unimplemented: enum discriminant size > u32 ");
                 //                 BinaryenIndex(discr_val)
@@ -1090,7 +1091,10 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
                             Layout::General { discr, ref variants, .. } => {
                                 if let AggregateKind::Adt(ref adt_def, variant, _, _) = *kind {
-                                    let discr_val = adt_def.variants[variant].disr_val as u32;
+                                    let discr_val = match adt_def.variants[variant].discr {
+                                        ty::VariantDiscr::Explicit(did) => unimplemented!(),
+                                        ty::VariantDiscr::Relative(_) => unimplemented!(),
+                                    };
                                     let discr_size = discr.size().bytes() as u32;
 
                                     debug!("allocating Enum '{:?}' in linear memory to \
@@ -1108,7 +1112,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                                discr_val);
                                         let discr_val =
                                             BinaryenConst(self.func.module.module,
-                                                          BinaryenLiteralInt32(discr_val as i32));
+                                                          //BinaryenLiteralInt32(discr_val as i32));
+                                                          BinaryenLiteralInt32(unimplemented!()));
                                         let write_discr = BinaryenStore(self.func.module.module,
                                                                         discr_size,
                                                                         0,
@@ -1143,8 +1148,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
                                     // TODO: handle signed vs unsigned here as well, or just in the
                                     // BinOps ?
-                                    let discr_val = adt_def.variants[variant].disr_val;
-                                    let discr_val = discr_val as i32;
+                                    let discr_val = adt_def.variants[variant].discr;
+                                    let discr_val = unimplemented!(); //discr_val as i32;
 
                                     // set enum discr
                                     unsafe {
@@ -1493,29 +1498,30 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         let is_trait_method = self.tcx.trait_of_item(fn_did).is_some();
 
         let (substs, sig) = if !is_trait_method {
-            (substs, &sig)
+            (substs, sig)
         } else {
             let (resolved_def_id, resolved_substs) =
                 traits::resolve_trait_method(self.tcx, fn_did, substs);
             let ty = self.tcx.item_type(resolved_def_id);
             // TODO: investigate rustc trans use of
             // liberate_bound_regions or similar here
-            let sig = ty.fn_sig().skip_binder();
+            let sig = ty.fn_sig();
+            let sig = sig.skip_binder();
 
             fn_did = resolved_def_id;
-            (resolved_substs, sig)
+            (resolved_substs, sig.clone())
         };
 
         let mir = {
-            self.tcx.mir_map.borrow()[&fn_did]
+            self.tcx.maps.mir.borrow()[&fn_did]
         };
 
-        let fn_sig = monomorphize::apply_substs(self.tcx, substs, sig);
+        let fn_sig = monomorphize::apply_substs(self.tcx, substs, &sig);
 
         // mark the fn defid seen to not have translated twice
         // TODO: verify this more thoroughly, works for our limited
         // tests right now
-        if sig != &fn_sig {
+        if sig != fn_sig {
             let fn_name = sanitize_symbol(&self.tcx
                 .item_path_str(fn_did));
             let fn_name = CString::new(fn_name).expect("");
@@ -1562,7 +1568,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                         let ty = self.tcx.item_type(def_id);
                         if ty.is_fn() {
                             assert!(def_id.is_local());
-                            let sig = ty.fn_sig().skip_binder();
+                            let sig = ty.fn_sig();
+                            let sig = sig.skip_binder();
 
                             let mut fn_did = def_id;
                             let fn_name = self.tcx.item_path_str(fn_did);
