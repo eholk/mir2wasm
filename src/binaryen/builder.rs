@@ -114,7 +114,7 @@ impl<'module, 'name> From<FnType<'module, 'name>> for sys::BinaryenFunctionTypeR
 /// Representable types.
 ///
 /// These are types that can actually exist, for example, as a local variable.
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ReprType {
     Int32,
     Int64,

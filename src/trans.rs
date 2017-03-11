@@ -1324,7 +1324,10 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 match projection.elem {
                     ProjectionElem::Deref => {
                         if base.offset.is_none() {
-                            return Some(BinaryenLvalue::new(base.index, None, LvalueExtra::None));
+                            // Converting the offset None into Some(0) tells calls this needs to be
+                            // dereferenced.
+                            return Some(BinaryenLvalue::new(base.index, Some(0),
+                                        LvalueExtra::BaseTy(rust_ty_to_builder(base_ty).expect("must dereference concrete type"))));
                         }
                         panic!("unimplemented Deref {:?}", lvalue);
                     }
@@ -1393,15 +1396,15 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                    binaryen_lvalue.index.0,
                                    lvalue);
                             let ptr =
-                                BinaryenGetLocal(self.func.module_ref(), binaryen_lvalue.index, t);
-                            // TODO: match on the field ty to know how many bytes to read, not just
+                                BinaryenGetLocal(self.func.module_ref(), binaryen_lvalue.index, BinaryenInt32());
+                            // TODO(eholk): match on the field ty to know how many bytes to read, not just
                             // i32s
                             BinaryenLoad(self.func.module.module,
                                          4,
                                          0,
                                          offset,
                                          0,
-                                         BinaryenInt32(),
+                                         t,
                                          ptr)
                         }
                         None => {
@@ -1715,7 +1718,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         self.fun_names.insert((did, sig.clone()), full_name);
 
 }else{
-        assert!(full_name == "wasm::::print_i32");
+        assert!(full_name == "wasm::::print_i32" || full_name == "wasm::::_print_i32");
 
         // import print i32
         let print_i32_name = CString::new("print_i32").expect("");
@@ -1860,6 +1863,8 @@ impl BinaryenLvalue {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum LvalueExtra {
     None,
+    /// the type of the thing this points to.
+    BaseTy(builder::ReprType),
     // Length(u64),
     // TODO(solson): Vtable(memory::AllocId),
     DowncastVariant(usize),
