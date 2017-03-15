@@ -36,7 +36,8 @@ let module_handler = {
 };
 let proxy_ffi = new Proxy({}, module_handler);
 
-WebAssembly.instantiate(buffer, proxy_ffi).then(instance => {
+WebAssembly.instantiate(buffer, proxy_ffi).then(result => {
+  const instance = result.instance;
   instance.exports.rust_entry();
 }).catch(err => {
   print(err.stack);
