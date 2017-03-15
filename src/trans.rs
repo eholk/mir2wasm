@@ -664,23 +664,35 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 TerminatorKind::Return => {
                     // handled during bb creation
                 }
-                TerminatorKind::Assert { ref target, ref cond, .. } => {
-                    debug!("emitting Branch for Assert, from bb{} to bb{}",
+                TerminatorKind::Assert { ref target, expected, ref cond, .. } => {
+                    debug!("emitting Branch for Assert, from bb{} to bb{}. cond={:?}",
                            i,
-                           target.index());
+                           target.index(),
+                           cond);
                     let cond = self.trans_operand(cond);
                     unsafe {
+                        // Add an unreachable for when the Assert fails.
+                        //
+                        // TODO(eholk): panic instead, with a helpful error message.
+                        let panic = RelooperAddBlock(relooper, BinaryenUnreachable(self.func.module.module));
+
+                        if expected {
                         RelooperAddBranch(relooper_blocks[i],
                                           relooper_blocks[target.index()],
                                           cond,
                                           BinaryenExpressionRef(ptr::null_mut()));
-                      // Add an unreachable for when the Assert fails.
-                      //
-                      // TODO(eholk): panic instead, with a helpful error message.
-                      let panic = RelooperAddBlock(relooper, BinaryenUnreachable(self.func.module.module));
                       RelooperAddBranch(relooper_blocks[i],
                           panic, BinaryenExpressionRef(ptr::null_mut()),
                           BinaryenExpressionRef(ptr::null_mut()));
+                      } else {
+                          RelooperAddBranch(relooper_blocks[i],
+                                            panic,
+                                            cond,
+                                            BinaryenExpressionRef(ptr::null_mut()));
+                        RelooperAddBranch(relooper_blocks[i],
+                            relooper_blocks[target.index()], BinaryenExpressionRef(ptr::null_mut()),
+                            BinaryenExpressionRef(ptr::null_mut()));
+                      }
                     }
                 }
                 TerminatorKind::Call { ref destination, ref cleanup, .. } => {
