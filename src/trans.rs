@@ -642,10 +642,13 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
                     assert!(values.len() > 0);
 
-                    for j in 0..values.len() - 1 {
+                    debug!("Adding edges for {}-way switch", values.len() + 1);
+
+                    for j in 0..values.len() {
                         let value = values[j].to_u32().expect("invalid switch index").into();
                         let target = targets[j].index();
                         let value_ptr = &value;
+                        debug!("Adding switch edge {}: bb{} -> bb{}", values[j].to_u32().expect("invalid switch index"), i, target);
                         unsafe {
                             RelooperAddBranchForSwitch(from, relooper_blocks[target], value_ptr,
                                 1u32.into(), BinaryenExpressionRef(ptr::null_mut()));
@@ -653,6 +656,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                     }
 
                     // Add the otherwise branch
+                    debug!("Adding default switch from bb{} to bb{}", i, targets[targets.len() - 1].index());
                     unsafe {
                         RelooperAddBranchForSwitch(from,
                                           relooper_blocks[targets[targets.len() - 1].index()],
