@@ -574,7 +574,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                 binaryen_stmts.push(b_call);
                                 if is_never {
                                     debug!("{:?} is !, adding unreachable", func);
-                                    let unreachable = self.func.unreachable().into();
+                                    let unreachable = self.unreachable().into();
                                     binaryen_stmts.push(unreachable);
                                 }
                             }
@@ -680,8 +680,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                         // Add an unreachable for when the Assert fails.
                         //
                         // TODO(eholk): panic instead, with a helpful error message.
-                        let panic = RelooperAddBlock(relooper,
-                                                     BinaryenUnreachable(self.func.module.module));
+                        let panic = RelooperAddBlock(relooper, self.unreachable().into());
 
                         if expected {
                             RelooperAddBranch(relooper_blocks[i],
@@ -750,7 +749,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                         .expect("no type associated with function signature"),
                                     var_types.as_ptr(),
                                     var_types.len().into(),
-                                    BinaryenUnreachable(self.func.module.module));
+                                    self.unreachable().into());
             } else {
                 // Create the function prologue
                 // TODO: the epilogue and prologue are not always necessary
@@ -1408,7 +1407,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                     Some(lval) => lval,
                     None => {
                         debug!("operand lval is unit: {:?}", operand);
-                        return unsafe { BinaryenUnreachable(self.func.module.module) };
+                        return self.unreachable().into();
                     }
                 };
                 let lval_ty = lvalue.ty(&*mir, self.tcx);
@@ -1811,6 +1810,12 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
     fn type_layout(&self, ty: Ty<'tcx>) -> &'tcx Layout {
         let substs = Substs::empty();
         self.type_layout_with_substs(ty, substs)
+    }
+}
+
+impl<'d, 'gcx: 'd + 'tcx, 'tcx: 'd, 'module> builder::ModuleOwned for BinaryenFnCtxt<'d, 'gcx, 'tcx, 'module> {
+    fn module(&self) -> &builder::Module {
+        self.func.module()
     }
 }
 
