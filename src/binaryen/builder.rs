@@ -312,4 +312,18 @@ mod test {
     fn create_module() {
         let _ = Module::new();
     }
+
+    #[test]
+    fn set_memory() {
+        for i in 0..33 {
+            let mut m = Module::new();
+            m.set_memory(0);
+        }
+    }
+
+    #[test]
+    fn create_func() {
+        let mut m = Module::new();
+        let _ = m.create_func();
+    }
 }
