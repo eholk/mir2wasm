@@ -304,6 +304,49 @@ impl<'a> From<&'a Var> for sys::BinaryenType {
     }
 }
 
+pub struct Expression {
+    expr: sys::BinaryenExpressionRef,
+    ty: Type,
+}
+
+impl Expression {
+    fn new(expr: sys::BinaryenExpressionRef, ty: Type) -> Expression {
+        Expression { expr: expr, ty: ty }
+    }
+}
+
+impl From<Expression> for sys::BinaryenExpressionRef {
+    fn from(expr: Expression) -> sys::BinaryenExpressionRef {
+        expr.expr
+    }
+}
+
+/// A trait for things that are associated with a module.
+pub trait ModuleOwned {
+  fn module(&self) -> &Module;
+}
+
+impl ModuleOwned for Module {
+    fn module(&self) -> &Module {
+        self
+    }
+}
+
+impl<'module> ModuleOwned for Fn<'module> {
+    fn module(&self) -> &Module {
+        self.module
+    }
+}
+
+pub trait ExpressionBuilder : ModuleOwned {
+    fn unreachable(&mut self) -> Expression {
+        let expr = unsafe { sys::BinaryenUnreachable(self.module().module) };
+        Expression::new(expr, None)
+    }
+}
+
+impl<T: ModuleOwned> ExpressionBuilder for T {}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -315,7 +358,7 @@ mod test {
 
     #[test]
     fn set_memory() {
-        for i in 0..33 {
+        for _ in 0..33 {
             let mut m = Module::new();
             m.set_memory(0);
         }
@@ -325,5 +368,18 @@ mod test {
     fn create_func() {
         let mut m = Module::new();
         let _ = m.create_func();
+    }
+
+    #[test]
+    fn build_unreachable_from_module() {
+        let mut m = Module::new();
+        m.unreachable();
+    }
+
+    #[test]
+    fn build_unreachable_from_fn() {
+        let mut m = Module::new();
+        let mut f = m.create_func();
+        f.unreachable();
     }
 }

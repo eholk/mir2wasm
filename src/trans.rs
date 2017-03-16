@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 use binaryen;
 use binaryen::*;
+use binaryen::builder::ExpressionBuilder;
 use monomorphize;
 use binops::binaryen_op_for;
 use traits;
@@ -573,7 +574,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                 binaryen_stmts.push(b_call);
                                 if is_never {
                                     debug!("{:?} is !, adding unreachable", func);
-                                    let unreachable = BinaryenUnreachable(self.func.module.module);
+                                    let unreachable = self.func.unreachable().into();
                                     binaryen_stmts.push(unreachable);
                                 }
                             }
