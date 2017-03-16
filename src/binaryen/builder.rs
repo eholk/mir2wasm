@@ -6,6 +6,7 @@ use std::io;
 use std::io::Write;
 use std::mem;
 use std::path::Path;
+use std::ptr;
 
 pub struct Module {
     // TODO: make this private
@@ -30,6 +31,28 @@ impl Module {
 
     pub fn optimize(&mut self) {
         unsafe { sys::BinaryenModuleOptimize(self.module) }
+    }
+
+    pub fn print(&mut self) {
+        unsafe { sys::BinaryenModulePrint(self.module); }
+    }
+
+    pub fn interpret(&mut self) {
+        unsafe { sys::BinaryenModuleInterpret(self.module); }
+    }
+
+    pub fn set_memory(&mut self, num_pages: usize) {
+        let mem_size = sys::BinaryenIndex(num_pages as u32);
+        unsafe {
+            sys::BinaryenSetMemory(self.module,
+                              mem_size,
+                              mem_size,
+                              CString::new("memory").expect("string allocation error").as_ptr(),
+                              ptr::null(),
+                              ptr::null(),
+                              ptr::null(),
+                              sys::BinaryenIndex(0));
+        }
     }
 
     pub fn create_func(&mut self) -> Fn {

@@ -19,6 +19,7 @@ use std::ffi::CString;
 use std::ptr;
 use std::collections::HashMap;
 use std::cell::RefCell;
+use binaryen;
 use binaryen::*;
 use monomorphize;
 use binops::binaryen_op_for;
@@ -63,24 +64,14 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let _ignore = tcx.dep_graph.in_ignore();
 
     if options.trace {
-        unsafe { BinaryenSetAPITracing(true) }
+        binaryen::set_api_tracing(true);
     }
 
     let mut module = builder::Module::new();
     module.auto_drop();
 
     // TODO: allow for a configurable (or auto-detected) memory size
-    let mem_size = BinaryenIndex(256);
-    unsafe {
-        BinaryenSetMemory(module.module,
-                          mem_size,
-                          mem_size,
-                          CString::new("memory").expect("string allocation error").as_ptr(),
-                          ptr::null(),
-                          ptr::null(),
-                          ptr::null(),
-                          BinaryenIndex(0));
-    }
+    module.set_memory(256);
 
     let mut module = visit_krate(tcx, module, entry_fn);
     assert!(module.is_valid(),
@@ -92,18 +83,16 @@ pub fn trans_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         module.optimize();
     }
 
-    unsafe {
-        if options.trace {
-            BinaryenSetAPITracing(false);
-        }
+    if options.trace {
+        binaryen::set_api_tracing(false);
+    }
 
-        if options.print && !options.interpret {
-            BinaryenModulePrint(module.module);
-        }
+    if options.print && !options.interpret {
+        module.print();
+    }
 
-        if options.interpret {
-            BinaryenModuleInterpret(module.module);
-        }
+    if options.interpret {
+        module.interpret();
     }
 
     for output in &options.binary_output_path {
