@@ -151,6 +151,17 @@ pub enum ReprType {
     Float64,
 }
 
+impl ReprType {
+    fn size(&self) -> usize {
+        match *self {
+            ReprType::Int32 |
+            ReprType::Float32 => 4,
+            ReprType::Int64 |
+            ReprType::Float64 => 8,
+        }
+    }
+}
+
 impl<'a> From<&'a ReprType> for sys::BinaryenType {
     fn from(ty: &ReprType) -> sys::BinaryenType {
         match ty {
@@ -232,6 +243,20 @@ impl<'module> Fn<'module> {
 
     pub fn get_var(&self, index: usize) -> &Var {
         &self.vars[index]
+    }
+
+    pub fn get_local(&self, index: usize) -> Expression {
+        let x = self.get_var(index);
+        let expr =
+            unsafe { sys::BinaryenGetLocal(self.module().module, x.index.into(), x.ty.into()) };
+        Expression::new(expr, Some(x.ty))
+    }
+
+    pub fn set_local(&self, index: usize, val: Expression) -> Expression {
+        let x = self.get_var(index);
+        assert!(Some(x.ty) == val.ty);
+        let expr = unsafe { sys::BinaryenSetLocal(self.module().module, x.index.into(), val.expr) };
+        Expression::new(expr, None)
     }
 
     // TODO: ret_ty should not be a parameter here.
@@ -348,8 +373,59 @@ impl<'module> ModuleOwned for Fn<'module> {
 }
 
 pub trait ExpressionBuilder: ModuleOwned {
-    fn unreachable(&mut self) -> Expression {
+    fn unreachable(&self) -> Expression {
         let expr = unsafe { sys::BinaryenUnreachable(self.module().module) };
+        Expression::new(expr, None)
+    }
+
+    fn int32(&self, k: i32) -> Expression {
+        let expr =
+            unsafe { sys::BinaryenConst(self.module().module, sys::BinaryenLiteralInt32(k)) };
+        Expression::new(expr, Some(ReprType::Int32))
+    }
+
+    fn int64(&self, k: i64) -> Expression {
+        let expr =
+            unsafe { sys::BinaryenConst(self.module().module, sys::BinaryenLiteralInt64(k)) };
+        Expression::new(expr, Some(ReprType::Int64))
+    }
+
+    fn call(&self, name: &str, args: &[Expression], ret_ty: Type) -> Expression {
+        let expr = unsafe {
+            let mut raw_args = Vec::with_capacity(args.len());
+            for arg in args {
+                raw_args.push(arg.expr);
+            }
+            sys::BinaryenCall(self.module().module,
+                              name.as_ptr() as *const i8,
+                              raw_args.as_ptr(),
+                              raw_args.len().into(),
+                              ret_ty.into())
+        };
+        Expression::new(expr, ret_ty)
+    }
+
+    fn load(&self, address: Expression, ty: ReprType) -> Expression {
+        assert!(address.ty == Some(ReprType::Int32));
+        let bytes = ty.size();
+        let signed = 0; // always do unsigned reads because we're reading the full type
+        let offset = 0;
+        let align = 0;
+        let ptr = address.expr;
+        let expr = unsafe {
+            sys::BinaryenLoad(self.module().module,
+                              bytes as u32,
+                              signed,
+                              offset,
+                              align,
+                              ty.into(),
+                              ptr)
+        };
+        Expression::new(expr, Some(ty))
+    }
+
+    fn drop(&self, expr: Expression) -> Expression {
+        let expr = unsafe { sys::BinaryenDrop(self.module().module, expr.expr) };
         Expression::new(expr, None)
     }
 }

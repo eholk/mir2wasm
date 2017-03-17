@@ -344,15 +344,13 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                     unsafe {
                         debug!("emitting function epilogue, GetLocal({}) + Store",
                                (&stack_pointer_local).index());
-                        let read_original_sp = BinaryenGetLocal(self.func.module.module,
-                                                                stack_pointer_local.into(),
-                                                                BinaryenInt32());
+                        let read_original_sp = self.func.get_local(stack_pointer_local);
                         let restore_original_sp = BinaryenStore(self.func.module.module,
                                                                 4,
                                                                 0,
                                                                 0,
-                                                                self.emit_sp(),
-                                                                read_original_sp,
+                                                                self.emit_sp().into(),
+                                                                read_original_sp.into(),
                                                                 BinaryenInt32());
                         binaryen_stmts.push(restore_original_sp);
                     }
@@ -533,7 +531,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                                                   size,
                                                                   offset,
                                                                   0,
-                                                                  sp,
+                                                                  self.emit_read_sp().into(),
                                                                   read_bytes,
                                                                   BinaryenInt64());
                                                 binaryen_stmts.push(copy_bytes);
@@ -720,10 +718,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 // TODO: the epilogue and prologue are not always necessary
                 debug!("emitting function prologue, SetLocal({}) + Load",
                        (&stack_pointer_local).index());
-                let copy_sp = BinaryenSetLocal(self.func.module.module,
-                                               stack_pointer_local.into(),
-                                               self.emit_read_sp());
-                let prologue = relooper.add_block_raw(copy_sp);
+                let copy_sp = self.func.set_local(stack_pointer_local, self.emit_read_sp());
+                let prologue = relooper.add_block(copy_sp);
                 if relooper.num_blocks() > 0 {
                     relooper[prologue].add_goto(&relooper[0])
                 }
@@ -909,8 +905,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                                                checked_local,
                                                                BinaryenInt64()));
 
-                    let thirty_two = BinaryenConst(self.func.module.module,
-                                                   BinaryenLiteralInt64(32));
+                    let thirty_two = self.int64(32);
 
                     let checked_op_local = self.checked_op_local.expect("no checked op temporary");
                     let upper =
@@ -921,7 +916,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                                      BinaryenGetLocal(self.func.module.module,
                                                                       checked_op_local,
                                                                       BinaryenInt64()),
-                                                     thirty_two));
+                                                     thirty_two.into()));
 
                     match dest.offset {
                         Some(offset) => {
@@ -1052,7 +1047,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                                                         discr_size,
                                                                         0,
                                                                         0,
-                                                                        self.emit_read_sp(),
+                                                                        self.emit_read_sp().into(),
                                                                         discr_val,
                                                                         BinaryenInt32());
                                         statements.push(write_discr);
@@ -1212,46 +1207,31 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
     // TODO: handle > 2GB allocations, when more types are handled and there's a consistent story
     // around signed and unsigned
-    fn emit_alloca(&self, dest: BinaryenIndex, dest_size: i32) -> BinaryenExpressionRef {
+    fn emit_alloca(&mut self, dest: BinaryenIndex, dest_size: i32) -> BinaryenExpressionRef {
         unsafe {
-            let sp = self.emit_sp();
-            let read_sp = BinaryenLoad(self.func.module.module, 4, 0, 0, 0, BinaryenInt32(), sp);
-
-            let dest_size = BinaryenLiteralInt32(dest_size);
-            let dest_size = BinaryenConst(self.func.module.module, dest_size);
+            let dest_size = self.int32(dest_size);
             let decr_sp = BinaryenBinary(self.func.module.module,
                                          BinaryenSubInt32(),
-                                         read_sp,
-                                         dest_size);
+                                         self.emit_read_sp().into(),
+                                         dest_size.into());
             let write_local = BinaryenTeeLocal(self.func.module.module, dest, decr_sp);
             let write_sp = BinaryenStore(self.func.module.module,
                                          4,
                                          0,
                                          0,
-                                         sp,
+                                         self.emit_sp().into(),
                                          write_local,
                                          BinaryenInt32());
             write_sp
         }
     }
 
-    fn emit_sp(&self) -> BinaryenExpressionRef {
-        unsafe {
-            BinaryenConst(self.func.module.module,
-                          BinaryenLiteralInt32(STACK_POINTER_ADDRESS))
-        }
+    fn emit_sp(&self) -> builder::Expression {
+        self.int32(STACK_POINTER_ADDRESS)
     }
 
-    fn emit_read_sp(&self) -> BinaryenExpressionRef {
-        unsafe {
-            BinaryenLoad(self.func.module.module,
-                         4,
-                         0,
-                         0,
-                         0,
-                         BinaryenInt32(),
-                         self.emit_sp())
-        }
+    fn emit_read_sp(&self) -> builder::Expression {
+        self.load(self.emit_sp(), builder::ReprType::Int32)
     }
 
     // TODO this function changed from being passed offsets-after-field to offsets-of-field...
@@ -1264,9 +1244,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         where I: IntoIterator<Item = u64>
     {
         unsafe {
-            let read_sp = self.emit_read_sp();
-
             for (offset, operand) in offsets.into_iter().zip(operands) {
+                let read_sp = self.emit_read_sp();
                 // let operand_ty = mir.operand_ty(*self.tcx, operand);
                 // TODO: match on the operand_ty to know how many bytes to store, not just i32s
                 let src = self.trans_operand(operand);
@@ -1274,7 +1253,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                                 4,
                                                 offset as u32,
                                                 0,
-                                                read_sp,
+                                                read_sp.into(),
                                                 src,
                                                 BinaryenInt32());
                 statements.push(write_field);
@@ -1580,8 +1559,6 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         let runtime_start_name_ptr = runtime_start_name.as_ptr();
         self.c_strings.push(runtime_start_name);
 
-        let entry_fn_name = &self.fun_names[&(self.did, self.sig.clone())];
-
         unsafe {
             let runtime_start_ty = BinaryenAddFunctionType(self.func.module.module,
                                                            runtime_start_name_ptr,
@@ -1604,38 +1581,30 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                               ptr::null(),
                               BinaryenIndex(0));
 
-            let stack_top = BinaryenConst(self.func.module.module, BinaryenLiteralInt32(0xFFFF));
+            let stack_top = self.int32(0xFFFF);
             let stack_init = BinaryenStore(self.func.module.module,
                                            4,
                                            0,
                                            0,
-                                           self.emit_sp(),
-                                           stack_top,
+                                           self.emit_sp().into(),
+                                           stack_top.into(),
                                            BinaryenInt32());
             statements.push(stack_init);
 
             // call start_fn(0, 0) or main()
-            let entry_fn_call;
-            if entry_fn == "start" {
-                let start_args = [BinaryenConst(self.func.module.module, BinaryenLiteralInt32(0)),
-                                  BinaryenConst(self.func.module.module, BinaryenLiteralInt32(0))];
-                let call = BinaryenCall(self.func.module.module,
-                                        entry_fn_name.as_ptr(),
-                                        start_args.as_ptr(),
-                                        BinaryenIndex(start_args.len() as _),
-                                        BinaryenInt32());
-                entry_fn_call = BinaryenDrop(self.func.module.module, call);
+            let entry_fn_name = &self.fun_names[&(self.did, self.sig.clone())];
+            let entry_fn_call = if entry_fn == "start" {
+                self.drop(self.call(entry_fn_name.to_str().expect("error converting string"),
+                                    &[self.int32(0), self.int32(0)],
+                                    Some(builder::ReprType::Int32)))
             } else {
                 assert!(entry_fn == "main");
                 assert!(self.sig.output().is_nil());
-                entry_fn_call = BinaryenCall(self.func.module.module,
-                                             entry_fn_name.as_ptr(),
-                                             ptr::null(),
-                                             BinaryenIndex(0),
-                                             BinaryenNone());
-            }
-
-            statements.push(entry_fn_call);
+                self.call(entry_fn_name.to_str().expect("error converting string"),
+                          &[],
+                          None)
+            };
+            statements.push(entry_fn_call.into());
 
             let body = BinaryenBlock(self.func.module.module,
                                      ptr::null(),
