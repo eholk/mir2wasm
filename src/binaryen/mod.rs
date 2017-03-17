@@ -1,4 +1,5 @@
 pub mod builder;
+pub mod relooper;
 pub mod sys;
 
 pub use self::sys::*;

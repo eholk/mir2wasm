@@ -34,24 +34,30 @@ impl Module {
     }
 
     pub fn print(&mut self) {
-        unsafe { sys::BinaryenModulePrint(self.module); }
+        unsafe {
+            sys::BinaryenModulePrint(self.module);
+        }
     }
 
     pub fn interpret(&mut self) {
-        unsafe { sys::BinaryenModuleInterpret(self.module); }
+        unsafe {
+            sys::BinaryenModuleInterpret(self.module);
+        }
     }
 
     pub fn set_memory(&mut self, num_pages: usize) {
         let mem_size = sys::BinaryenIndex(num_pages as u32);
         unsafe {
             sys::BinaryenSetMemory(self.module,
-                              mem_size,
-                              mem_size,
-                              CString::new("memory").expect("string allocation error").as_ptr(),
-                              ptr::null(),
-                              ptr::null(),
-                              ptr::null(),
-                              sys::BinaryenIndex(0));
+                                   mem_size,
+                                   mem_size,
+                                   CString::new("memory")
+                                       .expect("string allocation error")
+                                       .as_ptr(),
+                                   ptr::null(),
+                                   ptr::null(),
+                                   ptr::null(),
+                                   sys::BinaryenIndex(0));
         }
     }
 
@@ -311,7 +317,10 @@ pub struct Expression {
 
 impl Expression {
     fn new(expr: sys::BinaryenExpressionRef, ty: Type) -> Expression {
-        Expression { expr: expr, ty: ty }
+        Expression {
+            expr: expr,
+            ty: ty,
+        }
     }
 }
 
@@ -323,7 +332,7 @@ impl From<Expression> for sys::BinaryenExpressionRef {
 
 /// A trait for things that are associated with a module.
 pub trait ModuleOwned {
-  fn module(&self) -> &Module;
+    fn module(&self) -> &Module;
 }
 
 impl ModuleOwned for Module {
@@ -338,7 +347,7 @@ impl<'module> ModuleOwned for Fn<'module> {
     }
 }
 
-pub trait ExpressionBuilder : ModuleOwned {
+pub trait ExpressionBuilder: ModuleOwned {
     fn unreachable(&mut self) -> Expression {
         let expr = unsafe { sys::BinaryenUnreachable(self.module().module) };
         Expression::new(expr, None)

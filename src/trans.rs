@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use binaryen;
 use binaryen::*;
 use binaryen::builder::ExpressionBuilder;
+use binaryen::relooper::Relooper;
 use monomorphize;
 use binops::binaryen_op_for;
 use traits;
@@ -293,9 +294,6 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
         // Function prologue: stack pointer local
         let stack_pointer_local = self.func.create_local(builder::ReprType::Int32).index();
 
-        // relooper helper local for irreducible control flow
-        let relooper_local = self.func.create_local(builder::ReprType::Int32).index();
-
         // checked operation local for the intermediate result of a checked operation (double-width)
         let checked_op_local = self.func.create_local(builder::ReprType::Int64).index();
         assert!(self.func.get_var(checked_op_local).ty() == builder::ReprType::Int64);
@@ -303,22 +301,19 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
 
         let locals_count = self.sig.inputs().len() + self.func.num_locals();
         debug!(concat!("{} wasm locals initially found - params: {}, vars: {} ",
-                       "(incl. stack pointer helper ${}, relooper helper ${}, ",
+                       "(incl. stack pointer helper ${}, ",
                        "checked operation helper ${})"),
                locals_count,
                self.sig.inputs().len(),
                self.func.num_vars(),
                stack_pointer_local.index(),
-               relooper_local.index(),
                checked_op_local.index());
 
         // Create the relooper for tying together basic blocks. We're
         // going to first translate the basic blocks without the
         // terminators, then go back over the basic blocks and use the
         // terminators to configure the relooper.
-        let relooper = unsafe { RelooperCreate() };
-
-        let mut relooper_blocks = Vec::new();
+        let mut relooper = Relooper::new();
 
         debug!("{} MIR basic blocks to translate", mir.basic_blocks().len());
 
@@ -597,20 +592,23 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
             let name_ptr = name.as_ptr();
             self.c_strings.push(name);
 
-            unsafe {
-                debug!("emitting {}-statement Block bb{}", binaryen_stmts.len(), i);
-                let binaryen_expr = BinaryenBlock(self.func.module.module,
-                                                  name_ptr,
-                                                  binaryen_stmts.as_ptr(),
-                                                  BinaryenIndex(binaryen_stmts.len() as _));
-                let relooper_block = match block_kind {
-                    BinaryenBlockKind::Default => RelooperAddBlock(relooper, binaryen_expr),
-                    BinaryenBlockKind::Switch(ref cond) => {
-                        RelooperAddBlockWithSwitch(relooper, binaryen_expr, *cond)
-                    }
-                };
-                relooper_blocks.push(relooper_block);
-            }
+            debug!("emitting {}-statement Block bb{}", binaryen_stmts.len(), i);
+
+            let binaryen_expr = unsafe {
+                BinaryenBlock(self.func.module.module,
+                              name_ptr,
+                              binaryen_stmts.as_ptr(),
+                              BinaryenIndex(binaryen_stmts.len() as _))
+            };
+            match block_kind {
+                BinaryenBlockKind::Default => {
+                    add_block(&mut relooper, binaryen_expr);
+                    // relooper.add_block_raw(binaryen_expr);
+                }
+                BinaryenBlockKind::Switch(ref cond) => {
+                    relooper.add_block_raw_with_switch(*cond, binaryen_expr);
+                }
+            };
         }
 
         // Create the relooper edges from the bb terminators
@@ -621,15 +619,10 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                     debug!("emitting Branch for Goto, from bb{} to bb{}",
                            i,
                            target.index());
-                    unsafe {
-                        RelooperAddBranch(relooper_blocks[i],
-                                          relooper_blocks[target.index()],
-                                          BinaryenExpressionRef(ptr::null_mut()),
-                                          BinaryenExpressionRef(ptr::null_mut()));
-                    }
+                    relooper[i].add_goto(&relooper[target.index()]);
                 }
                 TerminatorKind::SwitchInt { ref discr, ref switch_ty, ref values, ref targets } => {
-                    let from = relooper_blocks[i];
+                    let from = &relooper[i];
 
                     let discr = self.trans_operand(discr);
 
@@ -645,27 +638,15 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                                values[j].to_u32().expect("invalid switch index"),
                                i,
                                target);
-                        unsafe {
-                            RelooperAddBranchForSwitch(from,
-                                                       relooper_blocks[target],
-                                                       value_ptr,
-                                                       1u32.into(),
-                                                       BinaryenExpressionRef(ptr::null_mut()));
-                        }
+                        from.add_switch_case(value, &relooper[target]);
                     }
 
                     // Add the otherwise branch
                     debug!("Adding default switch from bb{} to bb{}",
                            i,
                            targets[targets.len() - 1].index());
-                    unsafe {
-                        RelooperAddBranchForSwitch(from,
-                                                   relooper_blocks[targets[targets.len() - 1]
-                                                       .index()],
-                                                   ptr::null_mut(),
-                                                   0u32.into(),
-                                                   BinaryenExpressionRef(ptr::null_mut()));
-                    }
+                    let target_idx = targets[targets.len() - 1].index();
+                    from.add_switch_default(&relooper[target_idx])
                 }
                 TerminatorKind::Return => {
                     // handled during bb creation
@@ -676,31 +657,20 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                            target.index(),
                            cond);
                     let cond = self.trans_operand(cond);
-                    unsafe {
-                        // Add an unreachable for when the Assert fails.
-                        //
-                        // TODO(eholk): panic instead, with a helpful error message.
-                        let panic = RelooperAddBlock(relooper, self.unreachable().into());
+                    // Add an unreachable for when the Assert fails.
+                    //
+                    // TODO(eholk): panic instead, with a helpful error message.
+                    let panic = relooper.add_block(self.unreachable());
+                    let panic = &relooper[panic];
+                    let target = &relooper[target.index()];
 
-                        if expected {
-                            RelooperAddBranch(relooper_blocks[i],
-                                              relooper_blocks[target.index()],
-                                              cond,
-                                              BinaryenExpressionRef(ptr::null_mut()));
-                            RelooperAddBranch(relooper_blocks[i],
-                                              panic,
-                                              BinaryenExpressionRef(ptr::null_mut()),
-                                              BinaryenExpressionRef(ptr::null_mut()));
-                        } else {
-                            RelooperAddBranch(relooper_blocks[i],
-                                              panic,
-                                              cond,
-                                              BinaryenExpressionRef(ptr::null_mut()));
-                            RelooperAddBranch(relooper_blocks[i],
-                                              relooper_blocks[target.index()],
-                                              BinaryenExpressionRef(ptr::null_mut()),
-                                              BinaryenExpressionRef(ptr::null_mut()));
-                        }
+                    let block = &relooper[i];
+                    if expected {
+                        block.add_cond_branch_raw(cond, target);
+                        block.add_goto(panic);
+                    } else {
+                        block.add_cond_branch_raw(cond, panic);
+                        block.add_goto(target);
                     }
                 }
                 TerminatorKind::Call { ref destination, ref cleanup, .. } => {
@@ -710,12 +680,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                             debug!("emitting Branch for Call, from bb{} to bb{}",
                                    i,
                                    target.index());
-                            unsafe {
-                                RelooperAddBranch(relooper_blocks[i],
-                                                  relooper_blocks[target.index()],
-                                                  BinaryenExpressionRef(ptr::null_mut()),
-                                                  BinaryenExpressionRef(ptr::null_mut()));
-                            }
+                            relooper[i].add_goto(&relooper[target.index()]);
                         }
                         _ => (),
                     }
@@ -758,19 +723,11 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
                 let copy_sp = BinaryenSetLocal(self.func.module.module,
                                                stack_pointer_local.into(),
                                                self.emit_read_sp());
-                let prologue = RelooperAddBlock(relooper, copy_sp);
-
-                if relooper_blocks.len() > 0 {
-                    RelooperAddBranch(prologue,
-                                      relooper_blocks[0],
-                                      BinaryenExpressionRef(ptr::null_mut()),
-                                      BinaryenExpressionRef(ptr::null_mut()));
+                let prologue = relooper.add_block_raw(copy_sp);
+                if relooper.num_blocks() > 0 {
+                    relooper[prologue].add_goto(&relooper[0])
                 }
-
-                let body = RelooperRenderAndDispose(relooper,
-                                                    prologue,
-                                                    relooper_local.into(),
-                                                    self.func.module.module);
+                let body = relooper.render(&mut self.func, prologue);
 
                 // TODO(eholk): builderize this.
                 let var_types = self.func.binaryen_var_types();
@@ -1813,7 +1770,8 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
     }
 }
 
-impl<'d, 'gcx: 'd + 'tcx, 'tcx: 'd, 'module> builder::ModuleOwned for BinaryenFnCtxt<'d, 'gcx, 'tcx, 'module> {
+impl<'d, 'gcx: 'd + 'tcx, 'tcx: 'd, 'module> builder::ModuleOwned
+    for BinaryenFnCtxt<'d, 'gcx, 'tcx, 'module> {
     fn module(&self) -> &builder::Module {
         self.func.module()
     }
@@ -1923,4 +1881,8 @@ impl IntegerExt for layout::Integer {
             I128 => panic!("i128 is not yet supported"),
         }
     }
+}
+
+fn add_block(relooper: &mut Relooper, body: BinaryenExpressionRef) {
+    relooper.add_block_raw(body);
 }
