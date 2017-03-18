@@ -1208,22 +1208,16 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
     // TODO: handle > 2GB allocations, when more types are handled and there's a consistent story
     // around signed and unsigned
     fn emit_alloca(&mut self, dest: BinaryenIndex, dest_size: i32) -> BinaryenExpressionRef {
-        unsafe {
-            let dest_size = self.int32(dest_size);
-            let decr_sp = BinaryenBinary(self.func.module.module,
-                                         BinaryenSubInt32(),
-                                         self.emit_read_sp().into(),
-                                         dest_size.into());
-            let write_local = BinaryenTeeLocal(self.func.module.module, dest, decr_sp);
-            let write_sp = BinaryenStore(self.func.module.module,
-                                         4,
-                                         0,
-                                         0,
-                                         self.emit_sp().into(),
-                                         write_local,
-                                         BinaryenInt32());
-            write_sp
-        }
+        let dest_size = self.int32(dest_size);
+        let decr_sp = unsafe {
+            BinaryenBinary(self.func.module.module,
+                           BinaryenSubInt32(),
+                           self.emit_read_sp().into(),
+                           dest_size.into())
+        };
+        let decr_sp = builder::Expression::new(decr_sp, Some(builder::ReprType::Int32));
+        let write_local = self.func.tee_local(dest.0 as usize, decr_sp);
+        self.store(self.emit_sp(), write_local).into()
     }
 
     fn emit_sp(&self) -> builder::Expression {

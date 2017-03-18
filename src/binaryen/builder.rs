@@ -259,7 +259,14 @@ impl<'module> Fn<'module> {
         Expression::new(expr, None)
     }
 
-    // TODO: ret_ty should not be a parameter here.
+    pub fn tee_local(&self, index: usize, val: Expression) -> Expression {
+        let x = self.get_var(index);
+        assert!(Some(x.ty) == val.ty);
+        let expr = unsafe { sys::BinaryenTeeLocal(self.module().module, x.index.into(), val.expr) };
+        Expression::new(expr, Some(x.ty))
+    }
+
+    // TODO(eholk): ret_ty should not be a parameter here.
     pub fn create_sig_type(&mut self,
                            name: &CString,
                            ret_ty: Type)
@@ -341,7 +348,8 @@ pub struct Expression {
 }
 
 impl Expression {
-    fn new(expr: sys::BinaryenExpressionRef, ty: Type) -> Expression {
+    // TODO(eholk): this should not be pub.
+    pub fn new(expr: sys::BinaryenExpressionRef, ty: Type) -> Expression {
         Expression {
             expr: expr,
             ty: ty,
@@ -420,6 +428,25 @@ pub trait ExpressionBuilder: ModuleOwned {
                               align,
                               ty.into(),
                               ptr)
+        };
+        Expression::new(expr, Some(ty))
+    }
+
+    fn store(&self, address: Expression, val: Expression) -> Expression {
+        assert!(address.ty == Some(ReprType::Int32));
+        let ty = val.ty.expect("Cannot store unrepresentable type");
+        let bytes = ty.size();
+        let offset = 0;
+        let align = 0;
+        let ptr = address.expr;
+        let expr = unsafe {
+            sys::BinaryenStore(self.module().module,
+                               bytes as u32,
+                               offset,
+                               align,
+                               ptr,
+                               val.into(),
+                               ty.into())
         };
         Expression::new(expr, Some(ty))
     }
