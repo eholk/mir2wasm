@@ -348,8 +348,7 @@ pub struct Expression {
 }
 
 impl Expression {
-    // TODO(eholk): this should not be pub.
-    pub fn new(expr: sys::BinaryenExpressionRef, ty: Type) -> Expression {
+    fn new(expr: sys::BinaryenExpressionRef, ty: Type) -> Expression {
         Expression {
             expr: expr,
             ty: ty,
@@ -451,6 +450,18 @@ pub trait ExpressionBuilder: ModuleOwned {
         Expression::new(expr, Some(ty))
     }
 
+    fn binop(&self, op: Binop, lhs: Expression, rhs: Expression) -> Expression {
+        let (op, ret_ty) = binaryen_op_for(op, lhs.ty, rhs.ty);
+        let expr = unsafe {
+            sys::BinaryenBinary(self.module().module, op, lhs.into(), rhs.into())
+        };
+        Expression::new(expr, Some(ret_ty))
+    }
+
+    fn sub(&self, lhs: Expression, rhs: Expression) -> Expression {
+        self.binop(Binop::Sub, lhs, rhs)
+    }
+
     fn drop(&self, expr: Expression) -> Expression {
         let expr = unsafe { sys::BinaryenDrop(self.module().module, expr.expr) };
         Expression::new(expr, None)
@@ -458,6 +469,27 @@ pub trait ExpressionBuilder: ModuleOwned {
 }
 
 impl<T: ModuleOwned> ExpressionBuilder for T {}
+
+#[derive(Debug)]
+pub enum Binop {
+    Sub
+}
+
+// Returns a binaryen operator and its return type for a binop.
+fn binaryen_op_for(op: Binop, lhs_ty: Type, rhs_ty: Type) -> (sys::BinaryenOp, ReprType) {
+    let lhs_ty = lhs_ty.expect("binops only allowed on representable types");
+    let rhs_ty = rhs_ty.expect("binops only allowed on representable types");
+    match op {
+        Binop::Sub => {
+            assert!(rhs_ty == lhs_ty);
+            let op = match rhs_ty {
+                ReprType::Int32 => sys::BinaryenSubInt32(),
+                _ => panic!("unimplemented binary op: {:?}:{:?}", op, rhs_ty)
+            };
+            (op, rhs_ty)
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {

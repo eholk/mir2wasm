@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 use binaryen;
 use binaryen::*;
-use binaryen::builder::ExpressionBuilder;
+use binaryen::builder::{Binop, ExpressionBuilder, ReprType};
 use binaryen::relooper::Relooper;
 use monomorphize;
 use binops::binaryen_op_for;
@@ -1208,14 +1208,7 @@ impl<'f, 'tcx: 'f, 'module: 'f> BinaryenFnCtxt<'f, 'tcx, 'tcx, 'module> {
     // TODO: handle > 2GB allocations, when more types are handled and there's a consistent story
     // around signed and unsigned
     fn emit_alloca(&mut self, dest: BinaryenIndex, dest_size: i32) -> BinaryenExpressionRef {
-        let dest_size = self.int32(dest_size);
-        let decr_sp = unsafe {
-            BinaryenBinary(self.func.module.module,
-                           BinaryenSubInt32(),
-                           self.emit_read_sp().into(),
-                           dest_size.into())
-        };
-        let decr_sp = builder::Expression::new(decr_sp, Some(builder::ReprType::Int32));
+        let decr_sp = self.sub(self.emit_read_sp(), self.int32(dest_size));
         let write_local = self.func.tee_local(dest.0 as usize, decr_sp);
         self.store(self.emit_sp(), write_local).into()
     }
