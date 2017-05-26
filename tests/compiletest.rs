@@ -132,7 +132,10 @@ fn run_and_check_output(vm: &str, mut cmd: std::process::Command, expected: &[St
                     return true;
                 }
                 Err(()) => {
-                    writeln!(stderr.lock(), "[{}] Test execution failed", vm).unwrap();
+                    let mut stderr = stderr.lock();
+                    writeln!(stderr, "[{}] Test execution failed", vm).unwrap();
+                    writeln!(stderr, "Command was:").unwrap();
+                    writeln!(stderr, "{:?}", cmd).unwrap();
                     return false;
                 }
             }
@@ -279,7 +282,7 @@ impl<'a> TestSuite<'a> {
     }
 }
 
-#[cfg(target_os="linux")]
+#[cfg(any(target_os="linux", target_os="macos"))]
 fn run_in_vm(wasm: &Path, expected: &[String]) -> bool {
     let d8 = Path::new("./wasm-install/bin/d8");
     let rt = Path::new("./rt/rustrt.js");
@@ -293,17 +296,19 @@ fn run_in_vm(wasm: &Path, expected: &[String]) -> bool {
     run_and_check_output("V8", cmd, expected)
 }
 
-#[cfg(not(target_os="linux"))]
+#[cfg(not(any(target_os="linux", target_os="macos")))]
 fn run_in_vm(_wasm: &Path, _expected: &[String]) -> bool {
     true
 }
 
 #[test]
+#[ignore]
 fn compile_pass() {
     TestSuite::new("compile-pass").run()
 }
 
 #[test]
+#[ignore]
 fn run_compile_pass() {
     // TODO(eholk): This is a temporary test just to make sure we get
     // some coverage on our compile-pass tests. Eventually we should

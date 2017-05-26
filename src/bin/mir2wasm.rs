@@ -8,10 +8,6 @@ extern crate mir2wasm;
 extern crate rustc;
 extern crate rustc_driver;
 
-// FIXME: C++ static linkage hacks. How do you do this for real?!
-#[link_args = "-lstdc++ -static-libstdc++"]
-extern "C" {}
-
 use getopts::{getopts, optflag, optopt};
 use mir2wasm::trans::{self, WasmTransOptions};
 use rustc::session::Session;
@@ -47,11 +43,10 @@ impl<'a> CompilerCalls<'a> for WasmCompilerCalls {
             } else {
                 None
             };
-            trans::trans_crate(&state.tcx.unwrap(),
-                               state.mir_map.unwrap(),
+            trans::trans_crate(state.tcx.expect("type context needed").global_tcx(),
                                entry_fn,
                                &options)
-                .expect("error translating crate");
+                .expect("error translating crate")
         });
 
         control
@@ -67,6 +62,7 @@ fn main() {
                  optopt("o", "", "write a binary wasm module to FILE", "FILE"),
                  optflag("O", "", "optimize the compiled wast module"),
                  optflag("q", "", "do not print the compiled wast module"),
+                 optflag("", "trace", "trace binaryen api calls"),
                  optflag("h", "help", "display this help message")];
 
     let mut rustc_args = Vec::new();
@@ -139,9 +135,12 @@ fn main() {
     if matches.opt_present("q") {
         options.print = false;
     }
+    if matches.opt_present("trace") {
+        options.trace = true;
+    }
 
     let mut compiler_calls = WasmCompilerCalls::new(options);
-    match rustc_driver::run_compiler(&rustc_args, &mut compiler_calls) {
+    match rustc_driver::run_compiler(&rustc_args, &mut compiler_calls, None, None) {
         (Ok(_), _) => process::exit(0),
         (Err(code), _) => process::exit(code as i32),
     }

@@ -1,6 +1,11 @@
 use super::sys;
 
 use std::ffi::CString;
+use std::fs::File;
+use std::io;
+use std::io::Write;
+use std::mem;
+use std::path::Path;
 
 pub struct Module {
     // TODO: make this private
@@ -55,6 +60,29 @@ impl Module {
             raw_arg_tys: arg_tys,
             type_ref: ty,
         }
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        unsafe {
+            // TODO: find a way to determine the size of the buffer first. Right now we just make a
+            // 4MB buffer and truncate.
+            let mut buffer = Vec::with_capacity(1 << 22);
+            let size = sys::BinaryenModuleWrite(self.module,
+                                                mem::transmute(buffer.as_mut_ptr()),
+                                                buffer.capacity());
+
+            buffer.set_len(size);
+            buffer.shrink_to_fit();
+
+            buffer
+        }
+    }
+
+    pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        let mut file = try!(File::create(path));
+        let buffer = self.serialize();
+
+        file.write_all(buffer.as_slice())
     }
 }
 
@@ -162,23 +190,10 @@ impl<'module> Fn<'module> {
     }
 
     // TODO: this should be private
-    pub fn binaryen_vars(&self) -> Vec<sys::BinaryenIndex> {
-        (0..self.vars.len()).map(|x| x.into()).collect()
-    }
-
-    // TODO: this should be private
     pub fn binaryen_var_types(&self) -> Vec<sys::BinaryenType> {
         self.vars[self.num_args..].iter().map(|x| x.into()).collect()
     }
 
-    // TODO: this should be private
-    pub fn binaryen_arg_types(&self) -> Vec<sys::BinaryenType> {
-        self.vars[0..self.num_args].iter().map(|x| x.into()).collect()
-    }
-
-    pub fn num_args(&self) -> usize {
-        self.num_args
-    }
     pub fn num_vars(&self) -> usize {
         self.vars.len()
     }
@@ -207,7 +222,7 @@ impl<'module> Fn<'module> {
 }
 
 pub struct Var {
-    // TODO: this would be nice to have, but it causes issues.
+    // TODO: this func field would be nice to have, but it causes issues.
     // func: &'func Fn<'func>,
     ty: ReprType,
     index: usize,
